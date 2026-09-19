@@ -1,0 +1,27 @@
+# AMD ROCm GPU override (Linux, x86_64)
+#
+# RX 9060 XT / gfx1200:
+#   docker compose -f docker-compose.yml -f docker-compose.amd.yml up --build
+#
+# ROCm requires the native Linux Docker Engine. Docker Desktop for Linux runs
+# its daemon in a VM that does not expose the host's /dev/kfd device.
+
+name: clippyme
+
+services:
+  backend:
+    image: clippyme-backend-amd
+    build:
+      args:
+        GPU_RUNTIME: amd
+        ENABLE_WHISPER_DIARIZE: ${ENABLE_WHISPER_DIARIZE:-0}
+    devices:
+      - /dev/kfd:/dev/kfd
+      - /dev/dri:/dev/dri
+    ipc: host
+    shm_size: 8gb
+    security_opt:
+      - seccomp=unconfined
+    environment:
+      - ROCM_PATH=/opt/venv/lib/python3.11/site-packages/_rocm_sdk_devel
+      - PYTORCH_ROCM_ARCH=gfx1200

@@ -79,7 +79,7 @@ While a job runs you stay in control:
 | AI | Google Gemini (viral detection) · Deepgram Nova-3 / ElevenLabs Scribe (transcription) |
 | Frontend | React 18 · Vite 6 · Tailwind CSS v4 · lucide-react · custom toasts/primitives |
 | Publishing | Zernio multi-platform API |
-| Deploy | Docker Compose (CPU multi-arch + optional NVIDIA GPU profile) |
+| Deploy | Docker Compose (CPU multi-arch + NVIDIA CUDA / AMD ROCm profiles) |
 
 ---
 
@@ -102,6 +102,30 @@ Open the dashboard, drop in a YouTube URL or upload a file, and watch the pipeli
 
 ```bash
 docker compose -f docker-compose.yml -f docker-compose.gpu.yml up --build
+```
+
+### AMD ROCm GPU profile
+
+The AMD profile is pinned for RDNA 4 `gfx1200` (including the RX 9060 XT) and
+uses AMD's validated ROCm 10 / Python 3.11 / PyTorch 2.11 image. It also builds
+CTranslate2 4.8 with HIP, so both YOLO and the local Faster-Whisper fallback can
+use the Radeon GPU.
+
+ROCm needs the native Linux Docker Engine: Docker Desktop for Linux runs in a
+VM and does not expose the host's `/dev/kfd`. Select the native context first:
+
+```bash
+docker context use default
+docker compose -f docker-compose.yml -f docker-compose.amd.yml up --build
+```
+
+Verify the live container after it starts:
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.amd.yml exec backend \
+  python -c "import torch; print(torch.cuda.is_available(), torch.cuda.get_device_name(0), torch.version.hip)"
+docker compose -f docker-compose.yml -f docker-compose.amd.yml exec backend \
+  python -c "import ctranslate2; print(ctranslate2.get_cuda_device_count())"
 ```
 
 ### Production frontend (optional)
@@ -425,7 +449,7 @@ This project has been audited; the current state is suitable for **trusted LAN d
 
 ## CPU vs GPU
 
-The CPU image runs everywhere (Linux x86_64, ARM64, Apple Silicon via Docker Desktop). Faster-Whisper falls back to CPU automatically and YOLOv8 uses the CPU path. The NVIDIA profile adds CUDA wheels for `torch`, `nvidia-cublas-cu12`, and the cuDNN runtime, expect a ~500 MB image-size overhead.
+The CPU image runs everywhere (Linux x86_64, ARM64, Apple Silicon via Docker Desktop). Faster-Whisper falls back to CPU automatically and YOLOv8 uses the CPU path. The NVIDIA profile adds CUDA support. The AMD profile uses ROCm/HIP for PyTorch/YOLO and a HIP-built CTranslate2 for Faster-Whisper; it requires Linux, `/dev/kfd`, `/dev/dri`, and substantially more disk space because the validated AMD base image includes the full ROCm stack.
 
 ---
 

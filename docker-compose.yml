@@ -127,10 +127,15 @@ services:
       # for a deliberate LAN deployment: every API request must then carry
       # X-API-Token (the dashboard has a Settings field for it).
       - CLIPPYME_API_TOKEN=${CLIPPYME_API_TOKEN:-}
+      # Persistent cache directories for HuggingFace, Matplotlib and PyTorch
+      - HF_HOME=/app/data/cache/huggingface
+      - MPLCONFIGDIR=/app/data/cache/matplotlib
+      - TORCH_HOME=/app/data/cache/torch
     volumes:
       - .:/app
       - /app/__pycache__
       - ./data:/app/data
+      - ./docker-entrypoint.sh:/usr/local/bin/docker-entrypoint.sh:ro
     networks:
       - clippyme-net
     restart: unless-stopped

@@ -124,6 +124,7 @@ rendered).
 
 ```bash
 docker compose up --build            # primary run (backend :8000, frontend :5175)
+docker compose -f docker-compose.yml -f docker-compose.amd.yml up --build  # AMD ROCm (gfx1200)
 docker compose -f docker-compose.yml -f docker-compose.prod.yml up --build  # prod frontend (nginx)
 
 # Backend host tests (fast, no CV stack) + lint

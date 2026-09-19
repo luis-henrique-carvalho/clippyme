@@ -2,6 +2,7 @@
 #
 # CPU / Apple Silicon (default):  docker compose up --build
 # NVIDIA GPU:                     docker compose -f docker-compose.yml -f docker-compose.gpu.yml up --build
+# AMD ROCm GPU:                   docker compose -f docker-compose.yml -f docker-compose.amd.yml up --build
 
 ARG GPU_RUNTIME=cpu
 
@@ -62,7 +63,76 @@ ENV NVIDIA_VISIBLE_DEVICES=all
 ENV NVIDIA_DRIVER_CAPABILITIES=compute,utility
 
 # ============================================================
-# Stage 2b: CPU runtime (multi-arch: amd64, arm64, Apple Silicon)
+# Stage 2b: AMD ROCm runtime (x86_64, gfx1200 / RX 9060 XT)
+# ============================================================
+# AMD's validated image supplies a mutually-compatible ROCm 10 + Python 3.11
+# + PyTorch 2.11 stack. CTranslate2's PyPI wheel is CUDA-only, so build the
+# same pinned 4.8.0 release with HIP support for Faster-Whisper.
+FROM rocm/pytorch:rocm10.0_ubuntu24.04_py3.11_pytorch_release_2.11.0 AS runtime-amd
+
+USER root
+ENV DEBIAN_FRONTEND=noninteractive
+ENV TZ=Etc/UTC
+ENV ROCM_PATH=/opt/venv/lib/python3.11/site-packages/_rocm_sdk_devel
+ENV HIP_PATH=/opt/venv/lib/python3.11/site-packages/_rocm_sdk_devel
+ENV HIP_CLANG_PATH=/opt/venv/lib/python3.11/site-packages/_rocm_sdk_devel/llvm/bin
+ENV PYTORCH_ROCM_ARCH=gfx1200
+ENV PATH=/opt/venv/lib/python3.11/site-packages/_rocm_sdk_devel/bin:/opt/venv/lib/python3.11/site-packages/_rocm_sdk_devel/llvm/bin:$PATH
+ENV LD_LIBRARY_PATH=/usr/local/lib:/opt/venv/lib/python3.11/site-packages/_rocm_sdk_devel/lib:/opt/venv/lib/python3.11/site-packages/_rocm_sdk_devel/lib64:/opt/venv/lib/python3.11/site-packages/_rocm_sdk_devel/llvm/lib
+
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+    build-essential cmake git libopenblas-dev libatomic1 libquadmath0 \
+    ffmpeg libgl1 libglib2.0-0 libsm6 libxext6 libxrender1 libcairo2 \
+    curl unzip ca-certificates gosu && \
+    curl -fsSL https://deno.land/install.sh | sh -s v2.8.3 && \
+    mv /root/.deno/bin/deno /usr/local/bin/ && \
+    rm -rf /root/.deno /var/lib/apt/lists/* && \
+    AE_VERSION=30.5.0 && \
+    AE_ASSET=auto-editor-linux-x86_64 && \
+    AE_SHA=673e69b096d740736364f34669e864505294441f5ec9188642b33e24b07cf147 && \
+    curl -fsSL -o /usr/local/bin/auto-editor \
+      "https://github.com/WyattBlue/auto-editor/releases/download/${AE_VERSION}/$AE_ASSET" && \
+    echo "$AE_SHA  /usr/local/bin/auto-editor" | sha256sum -c - && \
+    chmod +x /usr/local/bin/auto-editor && \
+    (/usr/local/bin/auto-editor --version || echo "auto-editor version check failed (non-fatal)")
+
+# ROCm 10's official PyTorch image ships the runtime as Python wheels. Expand
+# the matching development extra so CMake can find HIP, hipBLAS and rocPRIM.
+RUN pip install --no-cache-dir \
+      --index-url https://stable.repo.amd.com/rocm/whl-next/ \
+      "rocm[devel]==10.0.0" && \
+    rocm-sdk init --quiet
+
+ARG CTRANSLATE2_VERSION=4.8.0
+RUN git clone --depth 1 --recurse-submodules --shallow-submodules \
+      --branch "v${CTRANSLATE2_VERSION}" \
+      https://github.com/OpenNMT/CTranslate2.git /tmp/CTranslate2 && \
+    cmake -S /tmp/CTranslate2 -B /tmp/CTranslate2/build \
+      -DCMAKE_BUILD_TYPE=Release \
+      -DCMAKE_INSTALL_PREFIX=/usr/local \
+      -DCMAKE_C_COMPILER=${ROCM_PATH}/llvm/bin/clang \
+      -DCMAKE_CXX_COMPILER=${ROCM_PATH}/llvm/bin/clang++ \
+      -DCMAKE_HIP_COMPILER=${ROCM_PATH}/llvm/bin/clang++ \
+      -DCMAKE_HIP_ARCHITECTURES=gfx1200 \
+      -DGPU_TARGETS=gfx1200 \
+      -DBUILD_CLI=OFF \
+      -DBUILD_TESTS=OFF \
+      -DOPENMP_RUNTIME=COMP \
+      -DWITH_HIP=ON \
+      -DWITH_MKL=OFF \
+      -DWITH_OPENBLAS=ON && \
+    cmake --build /tmp/CTranslate2/build --parallel "$(nproc)" && \
+    cmake --install /tmp/CTranslate2/build && \
+    ldconfig && \
+    pip install --no-cache-dir -r /tmp/CTranslate2/python/install_requirements.txt && \
+    cd /tmp/CTranslate2/python && \
+    CTRANSLATE2_ROOT=/usr/local python setup.py bdist_wheel && \
+    pip install --no-cache-dir --force-reinstall --no-deps dist/*.whl && \
+    cd / && rm -rf /tmp/CTranslate2
+
+# ============================================================
+# Stage 2c: CPU runtime (multi-arch: amd64, arm64, Apple Silicon)
 # ============================================================
 # Ubuntu 24.04 (glibc 2.39) instead of the old python:3.11-slim (Debian
 # bookworm, glibc 2.36) — auto-editor needs GLIBC_2.38 (see runtime-nvidia).
@@ -125,8 +195,9 @@ ENV PYTHONUNBUFFERED=1
 # system-wide install in /usr/local/bin when a newer version is available.
 ENV PATH=/app/data/bin:$PATH
 
-# Install Python deps. CUDA pip wheels (nvidia-cublas-cu12, cudnn) are only
-# needed on the GPU path — skipping them on CPU saves ~500 MB per image.
+# Install Python deps. CUDA packages are only needed on the NVIDIA path. The
+# AMD base already carries its validated PyTorch/ROCm stack and the HIP build
+# of CTranslate2 above, so exclude their CUDA/PyPI counterparts from the lock.
 #
 # Speaker diarization on the Whisper path is OPT-IN via ENABLE_WHISPER_DIARIZE.
 # pyannote.audio pulls ~500 MB of deps (pytorch-lightning, speechbrain,
@@ -142,7 +213,16 @@ COPY requirements.lock requirements.txt requirements-runtime-tools.txt ./
 # rebuilds) and is NOT baked into the image layer.
 RUN --mount=type=cache,target=/root/.cache/pip \
     pip install --upgrade pip && \
-    pip install -r requirements.lock -r requirements-runtime-tools.txt && \
+    if [ "$GPU_RUNTIME" = "amd" ]; then \
+        sed -E \
+          '/^(ctranslate2|cuda-bindings|cuda-pathfinder|cuda-toolkit|nvidia-[^=]+|torch|torchvision|triton)==/d' \
+          requirements.lock > /tmp/requirements-amd.lock && \
+        pip install -r /tmp/requirements-amd.lock -r requirements-runtime-tools.txt && \
+        rm -f /tmp/requirements-amd.lock && \
+        python -c "import ctranslate2, torch; assert torch.version.hip; print('ROCm', torch.version.hip, 'CTranslate2', ctranslate2.__version__)"; \
+    else \
+        pip install -r requirements.lock -r requirements-runtime-tools.txt; \
+    fi && \
     if [ "$GPU_RUNTIME" = "nvidia" ]; then \
         pip install nvidia-cublas-cu12 && \
         SITE=$(python -c "import site; print(site.getsitepackages()[0])") && \

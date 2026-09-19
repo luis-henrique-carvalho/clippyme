@@ -12,8 +12,11 @@ import torch
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
-# Test if CUDA actually works for faster-whisper (needs libcublas via ctranslate2).
-# Creating the model is not enough — libcublas only loads during actual encoding.
+# PyTorch deliberately exposes AMD ROCm through the same ``torch.cuda`` API.
+# Test whether the selected GPU backend actually works for Faster-Whisper.
+# Creating the model is not enough — the backend libraries only load during
+# actual encoding.
+GPU_BACKEND = "ROCm/HIP" if getattr(torch.version, "hip", None) else "CUDA"
 CUDA_AVAILABLE = False
 GPU_VRAM_GB = 0
 if DEVICE == "cuda":
@@ -26,12 +29,12 @@ if DEVICE == "cuda":
         del _m, _dummy
         CUDA_AVAILABLE = True
         GPU_VRAM_GB = round(torch.cuda.get_device_properties(0).total_memory / (1024**3), 1)
-        print(f"✅ CUDA runtime verified — GPU {torch.cuda.get_device_name(0)} ({GPU_VRAM_GB}GB VRAM)")
+        print(f"✅ {GPU_BACKEND} runtime verified — GPU {torch.cuda.get_device_name(0)} ({GPU_VRAM_GB}GB VRAM)")
     except Exception as e:
         CUDA_AVAILABLE = False
-        print(f"⚠️  CUDA not usable for Whisper: {type(e).__name__} — using CPU")
+        print(f"⚠️  {GPU_BACKEND} not usable for Whisper: {type(e).__name__} — using CPU")
 else:
-    print("ℹ️  No CUDA detected — using CPU")
+    print(f"ℹ️  No {GPU_BACKEND} GPU detected — using CPU")
 
 # Auto-select Whisper model based on available hardware
 # Models: tiny (39M) < base (74M) < small (244M) < medium (769M) < large-v3 (1.55B)
