@@ -213,13 +213,19 @@ async def _security_headers(request: Request, call_next):
     - Referrer-Policy: don't leak full URLs (job ids) to third parties.
     - CSP default-src 'none': the API serves JSON + media consumed by the
       separate Vite frontend; it should never itself be a script/HTML host.
+      Exception: /docs and /redoc are exempt because Swagger UI loads CSS,
+      JS and images from cdn.jsdelivr.net and fastapi.tiangolo.com, which a
+      strict 'none' policy would block entirely.
     Ref: OWASP Secure Headers Project.
     """
     response = await call_next(request)
     response.headers.setdefault("X-Content-Type-Options", "nosniff")
     response.headers.setdefault("X-Frame-Options", "DENY")
     response.headers.setdefault("Referrer-Policy", "strict-origin-when-cross-origin")
-    response.headers.setdefault("Content-Security-Policy", "default-src 'none'; frame-ancestors 'none'")
+    # Docs routes load external CDN assets — skip the restrictive CSP for them.
+    _is_docs_route = request.url.path.rstrip("/") in ("/docs", "/redoc", "/openapi.json")
+    if not _is_docs_route:
+        response.headers.setdefault("Content-Security-Policy", "default-src 'none'; frame-ancestors 'none'")
     return response
 
 
