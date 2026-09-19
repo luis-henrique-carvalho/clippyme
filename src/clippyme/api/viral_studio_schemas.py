@@ -522,6 +522,7 @@ class ViralItem(BaseModel):
     additional_instructions: Optional[str] = None
     selected_headline: Optional[str] = None
     caption: Optional[str] = None
+    ai_copy: Optional[AICopyData] = None
     status: ViralItemStatus = ViralItemStatus.PENDING
     source_path: Optional[str] = None
     rendered_path: Optional[str] = None

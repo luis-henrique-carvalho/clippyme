@@ -725,6 +725,7 @@ def update_item(item_id: str, updates: Union[Dict[str, Any], Any]) -> Dict[str, 
                             "caption",
                             "product_url",
                             "product_code",
+                            "ai_copy",
                         ):
                             item[k] = v
                     item["updated_at"] = _utcnow_iso()
