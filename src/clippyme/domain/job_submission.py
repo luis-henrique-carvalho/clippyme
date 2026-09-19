@@ -42,6 +42,7 @@ async def submit_job(
     on_change=None,
     cleanup_paths=(),
     input_path: str | None = None,
+    job_type: str | None = None,
 ) -> None:
     """Register and enqueue a job, rolling every artefact back on queue-full."""
     max_attempts = configured_max_attempts()
@@ -65,6 +66,8 @@ async def submit_job(
         "attempt": 0,
         "max_attempts": max_attempts,
     }
+    if job_type:
+        jobs[job_id]["job_type"] = str(job_type)
     try:
         job_queue.put_nowait(job_id)
     except asyncio.QueueFull:

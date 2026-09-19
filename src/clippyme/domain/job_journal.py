@@ -41,6 +41,7 @@ def snapshot(jobs: dict) -> dict:
             "pid": job.get("pid"),
             "attempt": int(job.get("attempt") or 0),
             "max_attempts": int(job.get("max_attempts") or 0),
+            "job_type": job.get("job_type"),
             "updated_at": time.time(),
         }
     return records
@@ -170,6 +171,15 @@ def _positive_int(value, default: int) -> int:
     return min(10, max(1, parsed))
 
 
+def _viral_item_id(cmd: list | None) -> str | None:
+    argv = [str(value) for value in (cmd or [])]
+    try:
+        index = argv.index("--item-id")
+        return argv[index + 1] or None
+    except (ValueError, IndexError):
+        return None
+
+
 def _recovered_entry(job_id: str, record: dict, message: str) -> dict:
     output_dir = record.get("output_dir", "")
     max_attempts = _positive_int(
@@ -188,6 +198,7 @@ def _recovered_entry(job_id: str, record: dict, message: str) -> dict:
         "input_path": record.get("input_path"),
         "attempt": max(0, int(record.get("attempt") or 0)),
         "max_attempts": max_attempts,
+        "job_type": record.get("job_type"),
         "result": {"clips": [], **runtime_result_fields(output_dir)},
     }
 
@@ -249,6 +260,28 @@ def recover_jobs(*, journal_path: str, jobs: dict, job_queue, output_root: str) 
                 job_id,
                 record.get("pid"),
             )
+
+        if record.get("job_type") == "viral_studio":
+            try:
+                jobs[job_id] = _recovered_entry(
+                    job_id, record, "Server restarted; re-enqueued Viral Studio item."
+                )
+                job_queue.put_nowait(job_id)
+                counts["resumed"] += 1
+                continue
+            except Exception as exc:
+                jobs.pop(job_id, None)
+                item_id = _viral_item_id(record.get("cmd"))
+                if item_id:
+                    try:
+                        from clippyme.domain import viral_studio_store
+                        viral_studio_store.update_item(item_id, {
+                            "status": "FAILED",
+                            "error_message": f"Viral Studio job recovery failed: {exc}",
+                        })
+                    except Exception:
+                        logger.warning("Could not mark Viral Studio item %s failed", item_id, exc_info=True)
+                logger.warning("Could not resume Viral Studio job %s: %s", job_id, exc)
 
         if is_resumable(
             output_dir,

@@ -102,3 +102,30 @@ def test_cancelling_runner_terminates_process_tree(monkeypatch, tmp_path):
     assert proc.running is False
     assert jobs["j"]["status"] == "failed"
     assert any("shutdown" in line.lower() for line in jobs["j"]["logs"])
+
+
+def test_viral_studio_job_completes_without_pipeline_metadata(monkeypatch, tmp_path):
+    import asyncio
+    import io
+
+    from clippyme.domain import job_runner as module
+
+    class Proc:
+        pid = 123
+        stdout = io.BytesIO(b"")
+        returncode = 0
+
+        def poll(self):
+            return 0
+
+    monkeypatch.setattr(module.subprocess, "Popen", lambda *args, **kwargs: Proc())
+    monkeypatch.setattr(module, "load_persistent_config", lambda: {})
+    jobs = {
+        "viral": {
+            "status": "queued", "logs": [], "cmd": ["python", "-m", "viral"],
+            "env": {}, "output_dir": str(tmp_path), "job_type": "viral_studio",
+        }
+    }
+
+    asyncio.run(module.make_run_job(jobs=jobs, output_root=str(tmp_path))("viral", jobs["viral"]))
+    assert jobs["viral"]["status"] == "completed"

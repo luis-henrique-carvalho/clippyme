@@ -527,6 +527,8 @@ class ViralItem(BaseModel):
     source_path: Optional[str] = None
     rendered_path: Optional[str] = None
     error_message: Optional[str] = None
+    job_id: Optional[str] = None
+    publication_records: List[Dict[str, Any]] = Field(default_factory=list)
     created_at: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
     updated_at: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
 
@@ -570,6 +572,87 @@ class BatchListResponse(BaseModel):
             if "total" not in values and "batches" in values and isinstance(values["batches"], list):
                 values["total"] = len(values["batches"])
         return values
+
+
+class ViralItemUpdate(BaseModel):
+    selected_headline: Optional[str] = Field(None, max_length=300)
+    caption: Optional[str] = Field(None, max_length=2200)
+    product_code: Optional[str] = Field(None, max_length=64)
+    product_url: Optional[str] = Field(None, max_length=2048)
+    manual_headline: Optional[str] = Field(None, max_length=300)
+    additional_instructions: Optional[str] = Field(None, max_length=1000)
+
+    model_config = ConfigDict(extra="forbid")
+
+    @field_validator("product_url")
+    @classmethod
+    def _check_product_url(cls, v: Optional[str]) -> Optional[str]:
+        return validate_affiliate_url(v)
+
+
+class ItemRenderRequest(BaseModel):
+    headline: Optional[str] = Field(None, max_length=300)
+    template_id: Optional[str] = Field(None, max_length=64)
+    watermark: bool = True
+
+
+class ViralPublishPlatform(BaseModel):
+    platform: str = Field(..., max_length=64)
+    accountId: Optional[str] = Field(None, max_length=128)
+    account_id: Optional[str] = Field(None, max_length=128)
+    platformSpecificData: Optional[Dict[str, Any]] = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def _sync_account_id(cls, values: Any) -> Any:
+        if isinstance(values, dict):
+            acc = values.get("accountId") or values.get("account_id")
+            if acc:
+                values["accountId"] = acc
+                values["account_id"] = acc
+        return values
+
+
+class ViralPublishRequest(BaseModel):
+    item_ids: List[str] = Field(..., min_length=1, max_length=100)
+    platforms: List[ViralPublishPlatform] = Field(..., min_length=1, max_length=16)
+    schedule_mode: str = Field("now", pattern=r"^(now|auto|manual)$")
+    scheduled_for: Optional[str] = Field(None, max_length=64)
+    timezone: Optional[str] = Field(None, max_length=64)
+    start_date: Optional[str] = Field(None, max_length=64)
+
+
+class ViralPublishResult(BaseModel):
+    item_id: str
+    status: str
+    post_id: Optional[str] = None
+    platform_post_id: Optional[str] = None
+    published_at: Optional[str] = None
+    error: Optional[str] = None
+
+
+class ViralPublishResponse(BaseModel):
+    results: List[ViralPublishResult] = Field(default_factory=list)
+    total: int = 0
+    successful: int = 0
+    failed: int = 0
+
+    @model_validator(mode="before")
+    @classmethod
+    def _calculate_totals(cls, values: Any) -> Any:
+        if isinstance(values, dict) and "results" in values and isinstance(values["results"], list):
+            res_list = values["results"]
+            values.setdefault("total", len(res_list))
+            values.setdefault(
+                "successful",
+                sum(1 for r in res_list if (isinstance(r, dict) and r.get("status") in ("published", "scheduled")) or (hasattr(r, "status") and r.status in ("published", "scheduled"))),
+            )
+            values.setdefault(
+                "failed",
+                sum(1 for r in res_list if (isinstance(r, dict) and r.get("status") == "failed") or (hasattr(r, "status") and r.status == "failed")),
+            )
+        return values
+
 
 
 # ============================================================================

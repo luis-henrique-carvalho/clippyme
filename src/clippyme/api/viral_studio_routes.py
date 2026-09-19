@@ -18,13 +18,17 @@ from clippyme.api.viral_studio_schemas import (
     BrandListResponse,
     BrandResponse,
     BrandUpdate,
+    ItemRenderRequest,
     TemplateCreate,
     TemplateListResponse,
     TemplateResponse,
     TemplateUpdate,
     ViralItem,
+    ViralItemUpdate,
+    ViralPublishRequest,
+    ViralPublishResponse,
 )
-from clippyme.domain import viral_studio_store
+from clippyme.domain import viral_studio_orchestrator, viral_studio_store
 
 router = APIRouter(tags=["viral-studio"])
 
@@ -126,6 +130,15 @@ async def create_batch(
 ):
     """Create and persist a new batch of items, enqueuing them in PENDING state."""
     batch = await asyncio.to_thread(viral_studio_store.create_batch, payload)
+    # The Viral Studio work uses the same durable worker, concurrency limit and
+    # journal as ordinary jobs.  Import lazily to avoid the app/router cycle.
+    from clippyme.api import app as app_module
+    await viral_studio_orchestrator.enqueue_batch(
+        batch,
+        jobs=app_module.jobs,
+        job_queue=app_module.job_queue,
+        on_change=app_module.persist_jobs,
+    )
     is_async = (
         request.headers.get("Prefer") == "respond-async"
         or request.query_params.get("async") == "true"
@@ -144,3 +157,58 @@ async def get_item(id: str):
     item = await asyncio.to_thread(viral_studio_store.get_item_or_raise, id)
     return item
 
+
+@router.patch("/items/{id}", response_model=ViralItem)
+async def update_item(id: str, payload: ViralItemUpdate):
+    """Update commercial copy, product code, link, or manual headline for an item."""
+    item = await asyncio.to_thread(viral_studio_store.update_item, id, payload)
+    return item
+
+
+@router.post("/items/{id}/render", response_model=ViralItem, status_code=status.HTTP_202_ACCEPTED)
+async def render_item(id: str, payload: ItemRenderRequest):
+    """Queue a fast re-render through the shared durable job worker."""
+    if payload.template_id:
+        await asyncio.to_thread(viral_studio_store.get_template_or_raise, payload.template_id)
+    from clippyme.api import app as app_module
+    await viral_studio_orchestrator.enqueue_item(
+        id, jobs=app_module.jobs, job_queue=app_module.job_queue,
+        on_change=app_module.persist_jobs, rerender=True, headline=payload.headline,
+        template_id=payload.template_id, watermark=payload.watermark,
+    )
+    return await asyncio.to_thread(viral_studio_store.get_item_or_raise, id)
+
+
+@router.post("/items/{id}/approve", response_model=ViralItem)
+async def approve_item(id: str):
+    """Approve a rendered item for social publishing."""
+    item = await asyncio.to_thread(viral_studio_orchestrator.approve_item, id)
+    return item
+
+
+@router.post("/items/{id}/retry", response_model=ViralItem)
+async def retry_item(id: str):
+    """Retry processing a failed or interrupted item."""
+    item = await viral_studio_orchestrator.retry_item(id)
+    from clippyme.api import app as app_module
+    await viral_studio_orchestrator.enqueue_item(
+        id,
+        jobs=app_module.jobs,
+        job_queue=app_module.job_queue,
+        on_change=app_module.persist_jobs,
+    )
+    return await asyncio.to_thread(viral_studio_store.get_item_or_raise, id)
+
+
+@router.post("/publish", response_model=ViralPublishResponse)
+async def publish_items(payload: ViralPublishRequest):
+    """Publish one or more approved items via Zernio integration."""
+    res = await viral_studio_orchestrator.publish_viral_items(
+        item_ids=payload.item_ids,
+        platforms=[platform.model_dump(exclude_none=True) for platform in payload.platforms],
+        schedule_mode=payload.schedule_mode,
+        scheduled_for=payload.scheduled_for,
+        timezone=payload.timezone,
+        start_date=payload.start_date,
+    )
+    return res

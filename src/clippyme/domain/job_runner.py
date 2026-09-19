@@ -233,6 +233,11 @@ def make_run_job(*, jobs: dict, output_root: str, on_change=None):
                 if returncode == 0:
                     jobs[job_id]["status"] = "completed"
                     jobs[job_id]["logs"].append("Process finished successfully.")
+                    # Viral Studio items are durable jobs too, but their
+                    # result lives in the Viral Studio store rather than the
+                    # traditional *_metadata.json pipeline artifact.
+                    if job_data.get("job_type") == "viral_studio":
+                        break
                     if not glob.glob(os.path.join(output_dir, "*_metadata.json")):
                         await asyncio.to_thread(
                             relocate_root_job_artifacts,

@@ -726,6 +726,8 @@ def update_item(item_id: str, updates: Union[Dict[str, Any], Any]) -> Dict[str, 
                             "product_url",
                             "product_code",
                             "ai_copy",
+                            "job_id",
+                            "publication_records",
                         ):
                             item[k] = v
                     item["updated_at"] = _utcnow_iso()
@@ -742,6 +744,53 @@ def update_item(item_id: str, updates: Union[Dict[str, Any], Any]) -> Dict[str, 
 
         _atomic_write_json(get_batches_path(), batches)
         return found_item
+
+
+def reserve_publication(item_id: str, key: str, requested_at: str) -> Dict[str, Any]:
+    """Atomically return or reserve an idempotent publication record."""
+    with _STORE_LOCK:
+        batches = _load_batches_locked()
+        for batch in batches.values():
+            for index, item in enumerate(batch.get("items", [])):
+                if item.get("id") != item_id and item.get("item_id") != item_id:
+                    continue
+                records = list(item.get("publication_records") or [])
+                existing = next((record for record in records if record.get("key") == key), None)
+                if existing:
+                    return {"reserved": False, "record": dict(existing)}
+                record = {"key": key, "status": "dispatching", "requested_at": requested_at}
+                records.append(record)
+                item["publication_records"] = records
+                item["updated_at"] = _utcnow_iso()
+                batch["items"][index] = item
+                _atomic_write_json(get_batches_path(), batches)
+                return {"reserved": True, "record": dict(record)}
+        raise NotFoundError(f"Item not found: {item_id}")
+
+
+def finish_publication(item_id: str, key: str, record: Dict[str, Any], *, status: Optional[str] = None) -> Dict[str, Any]:
+    """Atomically replace a reserved publication record and optional item state."""
+    with _STORE_LOCK:
+        batches = _load_batches_locked()
+        for batch in batches.values():
+            for index, item in enumerate(batch.get("items", [])):
+                if item.get("id") != item_id and item.get("item_id") != item_id:
+                    continue
+                records = list(item.get("publication_records") or [])
+                for record_index, existing in enumerate(records):
+                    if existing.get("key") == key:
+                        records[record_index] = dict(record)
+                        break
+                else:
+                    raise ValidationError("Publication reservation not found")
+                item["publication_records"] = records
+                if status:
+                    item["status"] = status
+                item["updated_at"] = _utcnow_iso()
+                batch["items"][index] = item
+                _atomic_write_json(get_batches_path(), batches)
+                return dict(item)
+        raise NotFoundError(f"Item not found: {item_id}")
 
 
 def save_item(item: Union[Dict[str, Any], Any]) -> Dict[str, Any]:

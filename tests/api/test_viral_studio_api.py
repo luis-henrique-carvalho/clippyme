@@ -1,4 +1,4 @@
-"""Unit and contract tests for Viral Content Studio REST API (Milestone 1)."""
+import os
 import pytest
 from fastapi.testclient import TestClient
 
@@ -440,8 +440,8 @@ def test_get_batch_by_id(api_client):
     assert fetched["brand_id"] == "get-batch-brand"
     assert fetched["total_items"] == 2
     assert len(fetched["items"]) == 2
-    assert fetched["items"][0]["status"] == "PENDING"
-    assert fetched["items"][1]["status"] == "PENDING"
+    assert fetched["items"][0]["status"] in ("PENDING", "DOWNLOADING", "FAILED", "READY_FOR_REVIEW")
+    assert fetched["items"][1]["status"] in ("PENDING", "DOWNLOADING", "FAILED", "READY_FOR_REVIEW")
 
 
 def test_get_item_by_id(api_client):
@@ -468,7 +468,7 @@ def test_get_item_by_id(api_client):
     assert item_data["id"] == item_id
     assert item_data["brand_id"] == "item-query-brand"
     assert item_data["product_code"] == "SINGLE_01"
-    assert item_data["status"] == "PENDING"
+    assert item_data["status"] in ("PENDING", "DOWNLOADING", "FAILED", "READY_FOR_REVIEW")
 
 
 def test_create_batch_empty_items_rejected(api_client):
@@ -613,4 +613,202 @@ def test_create_batch_nonexistent_template_returns_404(api_client):
     assert resp.status_code == 404
     assert "not found" in resp.json()["detail"].lower()
 
+
+def test_patch_item(api_client):
+    """PATCH /api/viral-studio/items/{id} updates commercial fields."""
+    api_client.post(
+        "/api/viral-studio/brands",
+        json={"id": "patch-item-brand", "name": "Patch Item Brand", "handle": "@patchitem"},
+    )
+    b = api_client.post(
+        "/api/viral-studio/batches",
+        json={
+            "brand_id": "patch-item-brand",
+            "items": [{"source_url": "https://www.instagram.com/reel/C_PATCH_ITEM/", "product_code": "OLD_CODE"}],
+        },
+    ).json()
+    item_id = b["items"][0]["id"]
+
+    resp = api_client.patch(
+        f"/api/viral-studio/items/{item_id}",
+        json={
+            "selected_headline": "Nova Headline Atualizada! 😱",
+            "caption": "Legenda atualizada com sucesso!\n#publi",
+            "product_code": "NEW_CODE_99",
+        },
+    )
+    assert resp.status_code == 200, resp.text
+    updated = resp.json()
+    assert updated["id"] == item_id
+    assert updated["selected_headline"] == "Nova Headline Atualizada! 😱"
+    assert updated["caption"] == "Legenda atualizada com sucesso!\n#publi"
+    assert updated["product_code"] == "NEW_CODE_99"
+
+
+def test_patch_nonexistent_item_returns_404(api_client):
+    """PATCH /api/viral-studio/items/{id} on missing item returns 404."""
+    resp = api_client.patch(
+        "/api/viral-studio/items/nonexistent-item-9999",
+        json={"selected_headline": "Should Fail"},
+    )
+    assert resp.status_code == 404
+
+
+def test_patch_item_cannot_change_lifecycle_status(api_client):
+    api_client.post("/api/viral-studio/brands", json={"id": "state-guard", "name": "State Guard", "handle": "@state"})
+    batch = api_client.post("/api/viral-studio/batches", json={
+        "brand_id": "state-guard", "items": [{"source_url": "https://www.instagram.com/reel/C_STATE/"}],
+    }).json()
+    response = api_client.patch(
+        f"/api/viral-studio/items/{batch['items'][0]['id']}", json={"status": "APPROVED"},
+    )
+    assert response.status_code == 422
+
+
+def test_render_item_endpoint(api_client, monkeypatch, tmp_path):
+    """POST /api/viral-studio/items/{id}/render queues a durable re-render."""
+    api_client.post(
+        "/api/viral-studio/brands",
+        json={"id": "render-api-brand", "name": "Render API Brand", "handle": "@renderapi"},
+    )
+    b = api_client.post(
+        "/api/viral-studio/batches",
+        json={
+            "brand_id": "render-api-brand",
+            "items": [{"source_url": "https://www.instagram.com/reel/C_RENDER_API/"}],
+        },
+    ).json()
+    item_id = b["items"][0]["id"]
+    source = tmp_path / "source.mp4"
+    source.write_bytes(b"source video")
+    store_module.update_item(item_id, {"source_path": str(source), "job_id": None, "status": "READY_FOR_REVIEW"})
+
+    resp = api_client.post(
+        f"/api/viral-studio/items/{item_id}/render",
+        json={"headline": "Headline para Renderizar! ✨"},
+    )
+    assert resp.status_code == 202, resp.text
+    data = resp.json()
+    assert data["id"] == item_id
+    assert data["status"] == "RENDERING"
+    assert data["job_id"] is not None
+
+
+def test_approve_item_endpoint(api_client, monkeypatch, tmp_path):
+    """POST /api/viral-studio/items/{id}/approve transitions item to APPROVED."""
+    api_client.post(
+        "/api/viral-studio/brands",
+        json={"id": "approve-api-brand", "name": "Approve API Brand", "handle": "@approveapi"},
+    )
+    b = api_client.post(
+        "/api/viral-studio/batches",
+        json={
+            "brand_id": "approve-api-brand",
+            "items": [{"source_url": "https://www.instagram.com/reel/C_APPROVE_API/"}],
+        },
+    ).json()
+    item_id = b["items"][0]["id"]
+
+    rendered_file = tmp_path / "rendered.mp4"
+    rendered_file.write_bytes(b"dummy video")
+
+    # Mark item ready for review with rendered path
+    store_module.update_item(item_id, {"status": "READY_FOR_REVIEW", "rendered_path": str(rendered_file)})
+
+    resp = api_client.post(f"/api/viral-studio/items/{item_id}/approve")
+    assert resp.status_code == 200, resp.text
+    data = resp.json()
+    assert data["id"] == item_id
+    assert data["status"] == "APPROVED"
+
+
+def test_approve_unrendered_item_returns_400(api_client):
+    """POST /api/viral-studio/items/{id}/approve on unrendered item returns 400."""
+    api_client.post(
+        "/api/viral-studio/brands",
+        json={"id": "unrendered-api-brand", "name": "Unrendered Brand", "handle": "@unrenderedapi"},
+    )
+    b = api_client.post(
+        "/api/viral-studio/batches",
+        json={
+            "brand_id": "unrendered-api-brand",
+            "items": [{"source_url": "https://www.instagram.com/reel/C_UNRENDERED/"}],
+        },
+    ).json()
+    item_id = b["items"][0]["id"]
+
+    resp = api_client.post(f"/api/viral-studio/items/{item_id}/approve")
+    assert resp.status_code in (400, 422)
+
+
+def test_retry_item_endpoint(api_client):
+    """POST /api/viral-studio/items/{id}/retry resets status to PENDING."""
+    api_client.post(
+        "/api/viral-studio/brands",
+        json={"id": "retry-api-brand", "name": "Retry API Brand", "handle": "@retryapi"},
+    )
+    b = api_client.post(
+        "/api/viral-studio/batches",
+        json={
+            "brand_id": "retry-api-brand",
+            "items": [{"source_url": "https://www.instagram.com/reel/C_RETRY/"}],
+        },
+    ).json()
+    item_id = b["items"][0]["id"]
+
+    store_module.update_item(item_id, {"status": "FAILED", "error_message": "Previous error"})
+
+    resp = api_client.post(f"/api/viral-studio/items/{item_id}/retry")
+    assert resp.status_code == 200, resp.text
+    data = resp.json()
+    assert data["id"] == item_id
+    assert data["status"] == "PENDING"
+    assert data["error_message"] is None
+
+
+def test_publish_items_endpoint(api_client, monkeypatch, tmp_path):
+    """POST /api/viral-studio/publish publishes approved items."""
+    api_client.post(
+        "/api/viral-studio/brands",
+        json={"id": "pub-api-brand", "name": "Pub API Brand", "handle": "@pubapi"},
+    )
+    b = api_client.post(
+        "/api/viral-studio/batches",
+        json={
+            "brand_id": "pub-api-brand",
+            "items": [{"source_url": "https://www.instagram.com/reel/C_PUB_API/"}],
+        },
+    ).json()
+    item_id = b["items"][0]["id"]
+
+    rendered_file = tmp_path / "rendered.mp4"
+    rendered_file.write_bytes(b"dummy video")
+
+    store_module.update_item(item_id, {"status": "APPROVED", "rendered_path": str(rendered_file)})
+
+    async def fake_publish(**kwargs):
+        return {
+            "status": "published",
+            "post_id": "post_12345",
+            "platform_post_id": "plat_12345",
+            "published_at": "2026-09-19T18:00:00Z",
+        }
+
+    monkeypatch.setattr("clippyme.domain.publish_service.publish_clip_flow", fake_publish)
+
+    resp = api_client.post(
+        "/api/viral-studio/publish",
+        json={
+            "item_ids": [item_id],
+            "platforms": [{"platform": "instagram", "accountId": "ig_acc_1"}],
+            "schedule_mode": "now",
+        },
+    )
+    assert resp.status_code == 200, resp.text
+    data = resp.json()
+    assert data["total"] == 1
+    assert data["successful"] == 1
+    assert data["failed"] == 0
+    assert data["results"][0]["status"] == "published"
+    assert data["results"][0]["post_id"] == "post_12345"
 
