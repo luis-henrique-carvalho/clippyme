@@ -4,7 +4,7 @@ import subprocess
 from unittest.mock import patch
 
 import pytest
-from PIL import Image
+from PIL import Image, ImageDraw
 
 from clippyme.api.viral_studio_schemas import Brand, VisualTemplate
 from clippyme.domain import viral_studio_renderer
@@ -161,7 +161,7 @@ def test_wrap_and_fit_headline_auto_downscales_long_text():
 
 def test_wrap_and_fit_headline_supports_accents_and_emojis():
     headline = "Quem tem cozinha pequena precisa ver isso! 😱 Diga adeus à bagunça ✨"
-    lines, font_size, height = viral_studio_renderer.wrap_and_fit_headline(
+    lines, _font_size, _height = viral_studio_renderer.wrap_and_fit_headline(
         text=headline,
         max_width=960,
         max_lines=3,
@@ -450,7 +450,7 @@ def test_wrap_and_fit_headline_empty_or_whitespace():
     assert lines == []
     assert height == 0
 
-    lines, font_size, height = viral_studio_renderer.wrap_and_fit_headline("    ", 960, 3)
+    lines, _font_size, height = viral_studio_renderer.wrap_and_fit_headline("    ", 960, 3)
     assert lines == []
     assert height == 0
 
@@ -485,4 +485,405 @@ def test_generate_header_overlay_disabled_components(tmp_path, test_brand):
     )
     assert os.path.isfile(out_png)
     assert meta["headline_lines"] == []
+    # When all components are disabled, top_used_height is 0 so video can use full canvas
+    assert meta["top_used_height"] == 0
+
+
+# ============================================================================
+# Adversarial & Edge-Case Tests (Round 1 Hardening)
+# ============================================================================
+
+def test_hex_to_ffmpeg_color_rejects_invalid_hex_and_supports_3_digit():
+    """Invalid hex color strings fall back to default; 3-digit shorthand is expanded."""
+    # Invalid characters
+    assert viral_studio_renderer._hex_to_ffmpeg_color("#GGGGGG") == "0xFFFFFF"
+    assert viral_studio_renderer._hex_to_ffmpeg_color("not_a_color") == "0xFFFFFF"
+    assert viral_studio_renderer._hex_to_ffmpeg_color("") == "0xFFFFFF"
+    # 3-digit shorthand
+    assert viral_studio_renderer._hex_to_ffmpeg_color("#FFF") == "0xFFFFFF"
+    assert viral_studio_renderer._hex_to_ffmpeg_color("#000") == "0x000000"
+    assert viral_studio_renderer._hex_to_ffmpeg_color("#1A2") == "0x11AA22"
+
+
+def test_hex_to_rgba_supports_3_digit_and_alpha():
+    """_hex_to_rgba handles 3-digit, 6-digit, and 8-digit hex."""
+    assert viral_studio_renderer._hex_to_rgba("#FFF", alpha=255) == (255, 255, 255, 255)
+    assert viral_studio_renderer._hex_to_rgba("#FF0000", alpha=200) == (255, 0, 0, 200)
+    assert viral_studio_renderer._hex_to_rgba("invalid", default=(10, 20, 30)) == (10, 20, 30, 255)
+
+
+def test_wrap_and_fit_headline_downscales_and_bounds_single_wide_word():
+    """Single very wide word downscales toward min_font_size and is bounded to max_width."""
+    wide_text = "SUPERHIPERMEGADESCONTOEXCLUSIVOPARAVOCECOMDESCONTO"
+    lines, font_size, _height = viral_studio_renderer.wrap_and_fit_headline(
+        wide_text,
+        max_width=400,
+        max_lines=3,
+        base_font_size=48,
+        min_font_size=24,
+    )
+    assert font_size < 48
+    assert len(lines) >= 1
+    dummy_draw = ImageDraw.Draw(Image.new("RGBA", (1, 1)))
+    font = viral_studio_renderer._resolve_font(viral_studio_renderer.DEFAULT_HEADLINE_FONT, font_size)
+    for line in lines:
+        bbox = dummy_draw.textbbox((0, 0), line, font=font)
+        w = bbox[2] - bbox[0]
+        assert w <= 400
+
+
+def test_calculate_video_placement_even_coordinates_across_aspect_ratios():
+    """calculate_video_placement must guarantee even x, y, width, height for chroma subsampling."""
+    for canvas_w, canvas_h in [(1080, 1920), (1080, 1080), (1920, 1080), (720, 1280)]:
+        for vid_w, vid_h in [(1920, 1080), (1080, 1920), (1080, 1080), (854, 480), (720, 1280), (1280, 720)]:
+            p = viral_studio_renderer.calculate_video_placement(canvas_w, canvas_h, 250, 150, vid_w, vid_h)
+            assert p["width"] % 2 == 0, f"width {p['width']} not even"
+            assert p["height"] % 2 == 0, f"height {p['height']} not even"
+            assert p["x"] % 2 == 0, f"x {p['x']} not even for vid ({vid_w},{vid_h}) on ({canvas_w},{canvas_h})"
+            assert p["y"] % 2 == 0, f"y {p['y']} not even for vid ({vid_w},{vid_h}) on ({canvas_w},{canvas_h})"
+            assert p["x"] >= 0
+            assert p["y"] >= 250
+            assert p["y"] + p["height"] <= canvas_h
+
+
+def test_generate_header_overlay_bounds_long_brand_name_and_handle(tmp_path):
+    """Extremely long brand name and handle must be bounded and not bleed past the canvas margin."""
+    long_brand = Brand.model_construct(
+        id="long-brand",
+        name="Achadinhos Super Incríveis e Maravilhosos do Brasil Inteiro Com Muitas Dicas Úteis 2026",
+        handle="@achadinhossuperincriveisemaravilhososdobrasilinteirocommuitasdicasuteis2026",
+    )
+    tmpl = VisualTemplate(
+        id="classic-affiliate",
+        width=1080,
+        height=1920,
+    )
+    out_png = str(tmp_path / "long_brand.png")
+    meta = viral_studio_renderer.generate_header_overlay(long_brand, tmpl, "Headline", out_png)
+    assert meta is not None
+    assert os.path.isfile(out_png)
+
+    im = Image.open(out_png)
+    bbox = im.getbbox()
+    # Right edge of non-empty pixels must stay within canvas_w - 20
+    assert bbox[2] <= 1080 - 20
+
+
+def test_generate_header_overlay_avatar_initial_handles_emoji_brand_name(tmp_path):
+    """Placeholder avatar initial uses first alphanumeric character, not emoji tofu."""
+    brand = Brand.model_construct(
+        id="emoji-brand",
+        name="✨ Achadinhos Incríveis",
+        handle="@achadinhos",
+    )
+    tmpl = VisualTemplate(id="classic-affiliate", avatar_enabled=True)
+    out_png = str(tmp_path / "emoji_brand.png")
+    meta = viral_studio_renderer.generate_header_overlay(brand, tmpl, "Headline", out_png)
+    assert meta is not None
+    assert os.path.isfile(out_png)
+
+
+def test_build_render_ffmpeg_cmd_watermark_placed_on_video_stream():
+    """Watermark logo is scaled and overlaid on the video stream before canvas padding."""
+    placement = {"x": 0, "y": 400, "width": 1080, "height": 608}
+    watermark_params = {
+        "path": "/tmp/logo.png",
+        "opacity": 0.8,
+        "position": "bottom-right",
+        "scale": 0.18,
+        "margin": 0.04,
+    }
+    cmd = viral_studio_renderer.build_render_ffmpeg_cmd(
+        source_path="/tmp/src.mp4",
+        overlay_path="/tmp/ov.png",
+        output_path="/tmp/out.mp4",
+        canvas_width=1080,
+        canvas_height=1920,
+        video_placement=placement,
+        background_color="#1A1A1A",
+        has_audio=False,
+        watermark_params=watermark_params,
+    )
+    idx = cmd.index("-filter_complex")
+    filter_graph = cmd[idx + 1]
+    # Watermark applied to video stream [vscaled][wmark]overlay=...[vwithlogo]
+    assert "[0:v]scale=1080:608[vscaled]" in filter_graph
+    assert "[vscaled][wmark]overlay=" in filter_graph
+    assert "[vwithlogo]pad=1080:1920:0:400" in filter_graph
+
+
+def test_probe_video_metadata_detects_rotation_metadata(tmp_path):
+    """probe_video_metadata swaps width/height when rotation tag is 90 or 270 degrees."""
+    dummy_video = str(tmp_path / "dummy.mp4")
+    with open(dummy_video, "wb") as f:
+        f.write(b"dummy")
+
+    fake_ffprobe_output = b"""{
+        "streams": [
+            {
+                "codec_type": "video",
+                "width": 1920,
+                "height": 1080,
+                "tags": {
+                    "rotate": "90"
+                }
+            }
+        ]
+    }"""
+
+    with patch("subprocess.check_output", return_value=fake_ffprobe_output):
+        w, h, has_audio = viral_studio_renderer.probe_video_metadata(dummy_video)
+        assert w == 1080
+        assert h == 1920
+        assert has_audio is False
+
+
+def test_render_viral_video_cleans_up_output_on_failure(tmp_path, test_brand, test_template):
+    """If FFmpeg fails, any partial output file is removed from disk."""
+    dummy_src = str(tmp_path / "dummy_source.mp4")
+    with open(dummy_src, "wb") as f:
+        f.write(b"source")
+
+    out_mp4 = str(tmp_path / "failed_out.mp4")
+
+    # Simulate FFmpeg failing and leaving a partial file
+    def fail_subprocess(*args, **kwargs):
+        with open(out_mp4, "wb") as f:
+            f.write(b"partial corrupted data")
+        raise subprocess.CalledProcessError(1, ["ffmpeg"], stderr=b"FFmpeg failed")
+
+    with patch("clippyme.domain.viral_studio_renderer.probe_video_metadata", return_value=(1080, 1920, False)), \
+         patch("subprocess.run", side_effect=fail_subprocess):
+        with pytest.raises(ComposeError):
+            viral_studio_renderer.render_viral_video(
+                source_path=dummy_src,
+                brand=test_brand,
+                template=test_template,
+                headline="Headline",
+                output_path=out_mp4,
+            )
+        # Partial file must have been cleaned up
+        assert not os.path.exists(out_mp4)
+
+
+def test_probe_video_metadata_ignores_attached_pic_streams(tmp_path):
+    """probe_video_metadata extracts main video resolution, ignoring attached thumbnails."""
+    dummy_video = str(tmp_path / "dummy_thumb.mp4")
+    with open(dummy_video, "wb") as f:
+        f.write(b"dummy")
+
+    import json
+    fake_probe = json.dumps({
+        "streams": [
+            {"codec_type": "video", "width": 1920, "height": 1080, "disposition": {"default": 1}},
+            {"codec_type": "video", "width": 320, "height": 320, "disposition": {"attached_pic": 1}},
+            {"codec_type": "audio", "codec_name": "aac"}
+        ]
+    }).encode("utf-8")
+
+    with patch("subprocess.check_output", return_value=fake_probe):
+        w, h, has_audio = viral_studio_renderer.probe_video_metadata(dummy_video)
+        assert w == 1920
+        assert h == 1080
+        assert has_audio is True
+
+
+def test_hex_to_ffmpeg_color_8_digit_hex():
+    """8-digit hex (#RRGGBBAA) extracts the RGB portion for FFmpeg filter parameter."""
+    assert viral_studio_renderer._hex_to_ffmpeg_color("#000000FF") == "0x000000"
+    assert viral_studio_renderer._hex_to_ffmpeg_color("#1A2B3C80") == "0x1A2B3C"
+    # Invalid length (7 digits) falls back to default
+    assert viral_studio_renderer._hex_to_ffmpeg_color("#1234567") == "0xFFFFFF"
+
+
+def test_wrap_and_fit_headline_clamps_min_font_size():
+    """wrap_and_fit_headline does not drop font size below min_font_size."""
+    long_text = "Esse organizador giratorio incrivel de armarios de cozinha vai mudar a sua vida e deixar tudo no lugar certo sem perder tempo!"
+    lines, font_size, _h = viral_studio_renderer.wrap_and_fit_headline(
+        long_text,
+        max_width=200,
+        max_lines=2,
+        base_font_size=48,
+        min_font_size=24,
+    )
+    assert font_size >= 24
+    assert len(lines) <= 2
+
+
+def test_wrap_and_fit_headline_handles_base_smaller_than_min():
+    """wrap_and_fit_headline handles base_font_size < min_font_size cleanly without returning empty lines."""
+    lines, font_size, _h = viral_studio_renderer.wrap_and_fit_headline(
+        "Texto de Teste",
+        max_width=500,
+        max_lines=3,
+        base_font_size=20,
+        min_font_size=24,
+    )
+    assert len(lines) >= 1
+    assert "Texto" in lines[0]
+
+
+def test_generate_header_overlay_non_square_avatar_aspect_ratio_preserved(tmp_path):
+    """Rectangular avatar (e.g. 300x150) is center-cropped without distortion."""
+    rect_avatar = str(tmp_path / "rect_avatar.png")
+    Image.new("RGBA", (300, 150), (255, 0, 0, 255)).save(rect_avatar)
+    brand = Brand.model_construct(
+        id="rect-brand",
+        name="Loja",
+        handle="@loja",
+        avatar_path=rect_avatar,
+    )
+    tmpl = VisualTemplate(id="classic", avatar_enabled=True, avatar_size=100)
+    out_png = str(tmp_path / "rect_overlay.png")
+    meta = viral_studio_renderer.generate_header_overlay(brand, tmpl, "Headline", out_png)
+    assert os.path.isfile(out_png)
+    assert meta["top_used_height"] > 100
+
+
+def test_generate_header_overlay_empty_handle_no_stray_at(tmp_path):
+    """Brand with empty or '@' handle does not draw a stray '@' glyph on canvas."""
+    brand = {"name": "Minha Loja Sem Handle", "handle": ""}
+    tmpl = {"avatar_enabled": False, "brand_name_enabled": True, "headline_enabled": False}
+    out_png = str(tmp_path / "no_handle.png")
+    meta = viral_studio_renderer.generate_header_overlay(brand, tmpl, "", out_png)
+    assert os.path.isfile(out_png)
+    im = Image.open(out_png)
+    bbox = im.getbbox()
+    # Height of text should only cover brand name (y ~ 80 to ~125), not stray handle below 130
+    assert bbox[3] < 140
+
+
+def test_calculate_video_placement_zero_bottom_margin_when_no_header():
+    """When top_used_height is 0 and no custom bottom_margin, video can fill the vertical canvas."""
+    p = viral_studio_renderer.calculate_video_placement(
+        canvas_width=1080,
+        canvas_height=1920,
+        top_used_height=0,
+        bottom_margin=0,
+        source_width=1080,
+        source_height=1920,
+    )
+    assert p["width"] == 1080
+    assert p["height"] == 1920
+    assert p["x"] == 0
+    assert p["y"] == 0
+
+
+def test_calculate_video_placement_normalizes_odd_canvas_dimensions():
+    """Odd canvas dimensions (e.g. 1081x1921) are rounded down to even integers."""
+    p = viral_studio_renderer.calculate_video_placement(
+        canvas_width=1081,
+        canvas_height=1921,
+        top_used_height=200,
+        bottom_margin=80,
+        source_width=1920,
+        source_height=1080,
+    )
+    assert p["available_width"] % 2 == 0
+    assert p["width"] % 2 == 0
+    assert p["height"] % 2 == 0
+    assert p["x"] % 2 == 0
+    assert p["y"] % 2 == 0
+
+
+def test_hex_to_rgba_supports_4_digit_hex():
+    """_hex_to_rgba supports CSS 4-digit hex #RGBA format (e.g. #123F)."""
+    assert viral_studio_renderer._hex_to_rgba("#123F") == (0x11, 0x22, 0x33, 0xFF)
+    assert viral_studio_renderer._hex_to_rgba("#0008") == (0, 0, 0, 0x88)
+    assert viral_studio_renderer._hex_to_ffmpeg_color("#123F") == "0x112233"
+
+
+def test_probe_video_metadata_handles_null_stream_dimensions(tmp_path):
+    """probe_video_metadata gracefully handles streams with null or zero width/height."""
+    dummy_video = str(tmp_path / "null_dim.mp4")
+    with open(dummy_video, "wb") as f:
+        f.write(b"dummy")
+
+    import json
+    fake_probe = json.dumps({
+        "streams": [
+            {"codec_type": "video", "width": None, "height": None},
+            {"codec_type": "audio", "codec_name": "aac"}
+        ]
+    }).encode("utf-8")
+
+    with patch("subprocess.check_output", return_value=fake_probe):
+        w, h, has_audio = viral_studio_renderer.probe_video_metadata(dummy_video)
+        assert w == 1080
+        assert h == 1920
+        assert has_audio is True
+
+
+def test_generate_header_overlay_clamps_zero_or_negative_template_geometry(tmp_path):
+    """Template dict with zero/negative avatar size or font sizes does not raise ValueError."""
+    brand = {"name": "Loja Teste", "handle": "@loja"}
+    tmpl = {
+        "avatar_enabled": True,
+        "avatar_size": 0,
+        "avatar_x": -10,
+        "avatar_y": -5,
+        "brand_name_font_size": 0,
+        "headline_font_size": -1,
+        "headline_max_lines": 0,
+    }
+    out_png = str(tmp_path / "clamped_geometry.png")
+    meta = viral_studio_renderer.generate_header_overlay(brand, tmpl, "Headline Teste", out_png)
+    assert meta is not None
+    assert os.path.isfile(out_png)
+
+
+def test_generate_header_overlay_blank_brand_name_uses_fallback_initial(tmp_path):
+    """Brand with whitespace-only or empty name uses 'V' fallback initial, avoiding empty text draw."""
+    brand = {"name": "   ", "handle": ""}
+    tmpl = {"avatar_enabled": True, "brand_name_enabled": False}
+    out_png = str(tmp_path / "blank_brand.png")
+    meta = viral_studio_renderer.generate_header_overlay(brand, tmpl, "", out_png)
+    assert meta is not None
+    assert os.path.isfile(out_png)
+
+
+def test_resolve_font_searches_system_fonts_when_bundled_missing():
+    """_resolve_font searches system TrueType font paths before falling back to default."""
+    with patch("os.path.isfile", side_effect=lambda p: "DejaVuSans" in p):
+        font = viral_studio_renderer._resolve_font("NonExistentFont.ttf", 32)
+        assert font is not None
+
+
+def test_synthetic_video_render_odd_dimensions_smoke_test(tmp_path, test_brand, test_template):
+    """Real FFmpeg execution with odd source dimensions (641x361) renders valid 1080x1920 MP4."""
+    if not viral_studio_renderer.os.path.isfile("/usr/bin/ffmpeg") and not viral_studio_renderer.os.path.isfile("/usr/local/bin/ffmpeg"):
+        import shutil
+        if not shutil.which("ffmpeg"):
+            pytest.skip("FFmpeg not installed")
+
+    src = str(tmp_path / "odd_synthetic.mp4")
+    # Generate 1-second synthetic 641x361 video with odd dimensions (using yuv444p to permit odd dimensions)
+    gen_cmd = [
+        "ffmpeg", "-y",
+        "-f", "lavfi", "-i", "testsrc=duration=1:size=641x361:rate=25",
+        "-f", "lavfi", "-i", "sine=frequency=1000:duration=1",
+        "-c:v", "libx264", "-pix_fmt", "yuv444p",
+        "-c:a", "aac",
+        "-shortest",
+        src,
+    ]
+    import subprocess
+    subprocess.run(gen_cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+    assert os.path.isfile(src)
+
+    rendered = str(tmp_path / "odd_rendered.mp4")
+    output = viral_studio_renderer.render_viral_video(
+        source_path=src,
+        brand=test_brand,
+        template=test_template,
+        headline="Odd Dimensions Test!",
+        output_path=rendered,
+        watermark=False,
+    )
+    assert output == rendered
+    assert os.path.isfile(rendered)
+    assert os.path.getsize(rendered) > 0
+
+
+
 

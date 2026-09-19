@@ -76,6 +76,12 @@ def build_affiliate_copy_prompt(
     brand_name = _extract_field(brand, "name", "Achadinhos")
     brand_handle = _extract_field(brand, "handle", "@achadinhos")
     default_cta = _extract_field(brand, "default_cta", "Confira os achadinhos no link da bio!")
+    brand_tone = (
+        _extract_field(brand, "tone")
+        or _extract_field(brand, "tone_of_voice")
+        or _extract_field(_extract_field(brand, "publishing_profiles", {}), "tone")
+        or "Entusiasmado, curioso e direto (estilo Achadinhos viral)"
+    )
 
     product_code_str = str(product_code).strip() if product_code else ""
     product_url_str = str(product_url).strip() if product_url else ""
@@ -105,6 +111,7 @@ def build_affiliate_copy_prompt(
         "--- CONTEXTO DA MARCA ---\n"
         f"- Nome da marca: {brand_name}\n"
         f"- Perfil / Handle: {brand_handle}\n"
+        f"- Tom de voz da marca: {brand_tone}\n"
         f"- CTA padrão da marca: {default_cta}\n"
         f"{code_instruction}"
         f"{url_instruction}"
@@ -126,7 +133,8 @@ def build_affiliate_copy_prompt(
         "3. INTEGRIDADE COMERCIAL:\n"
         "   - NUNCA invente funcionalidades milagrosas que não existem no produto.\n"
         "   - NUNCA invente preços, porcentagens de desconto ou códigos promocionais não fornecidos.\n"
-        "   - NUNCA use promessas enganosas.\n\n"
+        "   - NUNCA use chamadas como 'Comente QUERO que eu envio no direct' nem promessas de automação por direct/DM.\n"
+        "   - NUNCA use promessas enganosas, links falsos ou comissões fictícias.\n\n"
         "--- FORMATO DE RESPOSTA ---\n"
         "Responda EXCLUSIVAMENTE em JSON válido, sem texto antes ou depois, seguindo esta estrutura:\n"
         "{\n"
@@ -194,19 +202,19 @@ def parse_affiliate_copy_response(
 
     parsed_obj: Optional[Dict[str, Any]] = None
 
-    # Level 1: Strict JSON parse
+    # Level 1: Standard JSON parse (strict=False permits literal newlines/tabs inside strings)
     try:
-        data = json.loads(json_candidate)
+        data = json.loads(json_candidate, strict=False)
         if isinstance(data, dict):
             parsed_obj = data
     except (json.JSONDecodeError, ValueError):
         pass
 
-    # Level 2: Deterministic clean
+    # Level 2: Deterministic clean + strict=False
     if parsed_obj is None:
         try:
             cleaned = _clean_json_str(json_candidate)
-            data = json.loads(cleaned)
+            data = json.loads(cleaned, strict=False)
             if isinstance(data, dict):
                 parsed_obj = data
         except (json.JSONDecodeError, ValueError):
@@ -282,10 +290,19 @@ def _normalize_parsed_dict(
     # Normalize headlines
     raw_headlines = data.get("headlines")
     headlines: List[str] = []
+    if isinstance(raw_headlines, str):
+        raw_headlines = [
+            re.sub(r"^(?:[-*•–—]|\d+[\.\-\)])\s*", "", line.strip())
+            for line in raw_headlines.splitlines()
+            if line.strip()
+        ]
     if isinstance(raw_headlines, list):
         for h in raw_headlines:
             if isinstance(h, str) and h.strip():
-                headlines.append(h.strip()[:300])
+                clean_h = h.strip()
+                clean_h = re.sub(r"^(?:[-*•–—]|\d+[\.\-\)])\s*", "", clean_h)
+                if clean_h and clean_h[:300] not in headlines:
+                    headlines.append(clean_h[:300])
 
     if not headlines:
         headlines = list(DEFAULT_FALLBACK_HEADLINES)
@@ -297,17 +314,41 @@ def _normalize_parsed_dict(
             if len(headlines) >= 5:
                 break
 
-    headlines = headlines[:10]
+    # Selected headline resolution
+    raw_selected = str(data.get("selected_headline") or "").strip()
+    selected_headline = re.sub(r"^(?:[-*•–—]|\d+[\.\-\)])\s*", "", raw_selected).strip()
 
-    # Selected headline
-    selected_headline = str(data.get("selected_headline") or "").strip()
-    if not selected_headline or selected_headline not in headlines:
+    # Handle option index references: "Opção 2", "Opcao 3", "Option 4", "2", "Opção 3: Texto"
+    option_m = re.match(
+        r"^(?:op[çc][ãa]o|option)?\s*([1-9]|10)\b(?:\s*[:\-\.]\s*(.*))?$",
+        raw_selected,
+        re.IGNORECASE,
+    )
+    if option_m:
+        opt_idx = int(option_m.group(1)) - 1
+        tail = (option_m.group(2) or "").strip()
+        if tail:
+            selected_headline = tail
+        elif 0 <= opt_idx < len(headlines):
+            selected_headline = headlines[opt_idx]
+        else:
+            selected_headline = headlines[0]
+
+    if not selected_headline:
         selected_headline = headlines[0]
+    elif selected_headline not in headlines:
+        headlines.insert(0, selected_headline)
+
+    # Strictly clamp to 10 headlines AFTER any insertions
+    headlines = headlines[:10]
     selected_headline = selected_headline[:300]
 
     # Hashtags
     raw_hashtags = data.get("hashtags")
     hashtags: List[str] = []
+    if isinstance(raw_hashtags, str):
+        # Support string format: "#achadinhos #cozinha #dicas" or comma separated
+        raw_hashtags = re.findall(r"#?[\w-]+", raw_hashtags)
     if isinstance(raw_hashtags, list):
         for tag in raw_hashtags:
             if isinstance(tag, str):
@@ -321,21 +362,50 @@ def _normalize_parsed_dict(
         hashtags = list(DEFAULT_FALLBACK_HASHTAGS)
 
     # Caption
-    caption = str(data.get("caption") or "").strip()
+    raw_caption = data.get("caption")
+    if isinstance(raw_caption, list):
+        caption = "\n\n".join(str(p).strip() for p in raw_caption if str(p).strip())
+    else:
+        caption = str(raw_caption or "").strip()
+
+    clean_code = str(product_code).strip() if (product_code is not None and str(product_code).strip()) else ""
     if not caption:
         # Assemble structured caption
         parts = [selected_headline]
         if product_desc:
             parts.append(product_desc)
-        if product_code:
-            parts.append(f"📌 Produto {product_code}")
+        if clean_code:
+            parts.append(f"📌 Produto {clean_code}")
         parts.append(default_cta)
         parts.append(" ".join(hashtags))
         caption = "\n\n".join(parts)
     else:
         # Guarantee product code is in caption if provided
-        if product_code and str(product_code) not in caption:
-            caption = f"{caption}\n📌 Produto {product_code}"
+        if clean_code:
+            has_code = bool(
+                re.search(
+                    rf"(?:produto|código|codigo|cod\.?|ref\.?)\s*:?\s*#?{re.escape(clean_code)}\b",
+                    caption,
+                    re.IGNORECASE,
+                )
+                or f"📌 Produto {clean_code}" in caption
+                or f"Código: {clean_code}" in caption
+            )
+            if not has_code:
+                extra = f"📌 Produto {clean_code}"
+                # If caption ends with hashtags block, insert code before hashtags
+                tag_tail_m = re.search(r"(\n+(?:#[\w-]+\s*)+)$", caption)
+                if tag_tail_m:
+                    head = caption[: tag_tail_m.start()].rstrip()
+                    tail = tag_tail_m.group(1).lstrip()
+                    cand = f"{head}\n\n{extra}\n\n{tail}"
+                else:
+                    cand = f"{caption}\n\n{extra}"
+
+                if len(cand) <= 2200:
+                    caption = cand
+                else:
+                    caption = f"{cand[:2200 - len(extra) - 2]}\n\n{extra}"
 
     caption = caption[:2200]
 
@@ -362,8 +432,9 @@ def _build_fallback_copy_data(
         selected_headline,
         "Esse achadinho vai transformar o seu espaço e facilitar muito o seu dia a dia!",
     ]
-    if product_code:
-        parts.append(f"📌 Produto {product_code}")
+    clean_code = str(product_code).strip() if (product_code is not None and str(product_code).strip()) else ""
+    if clean_code:
+        parts.append(f"📌 Produto {clean_code}")
     parts.append(default_cta)
     parts.append(" ".join(hashtags))
     caption = "\n\n".join(parts)
@@ -396,21 +467,76 @@ async def generate_affiliate_copy(
     # 1. Caching check: bypass Gemini if item already has ai_copy
     existing_copy = _extract_field(item, "ai_copy")
     if existing_copy is not None:
+        copy_obj: Optional[AICopyData] = None
         if isinstance(existing_copy, AICopyData):
-            logger.info("generate_affiliate_copy: Returning cached AICopyData for item")
-            return existing_copy
+            copy_obj = existing_copy.model_copy()
         elif isinstance(existing_copy, dict):
             try:
                 copy_obj = AICopyData.model_validate(existing_copy)
-                logger.info("generate_affiliate_copy: Returning cached AICopyData from dict")
-                return copy_obj
             except Exception:
                 pass
+        if copy_obj is not None:
+            # Reconcile manual headline override and custom caption on item
+            effective_selected_headline = (
+                _extract_field(item, "manual_headline")
+                or _extract_field(item, "selected_headline")
+                or copy_obj.selected_headline
+            )
+            clean_headline = str(effective_selected_headline or "").strip()
+            if not clean_headline:
+                clean_headline = copy_obj.headlines[0] if copy_obj.headlines else DEFAULT_FALLBACK_HEADLINES[0]
+            copy_obj.selected_headline = clean_headline[:300]
+            if clean_headline not in copy_obj.headlines:
+                copy_obj.headlines.insert(0, clean_headline[:300])
+            copy_obj.headlines = copy_obj.headlines[:10]
+
+            effective_caption = _extract_field(item, "caption") or copy_obj.caption
+            copy_obj.caption = effective_caption
+
+            # Update in-memory item
+            if isinstance(item, dict):
+                item["ai_copy"] = copy_obj.model_dump()
+                item["selected_headline"] = clean_headline
+                item["caption"] = effective_caption
+                if video_path and not item.get("source_path"):
+                    item["source_path"] = video_path
+            else:
+                try:
+                    item.ai_copy = copy_obj
+                    item.selected_headline = clean_headline
+                    item.caption = effective_caption
+                    if video_path and not getattr(item, "source_path", None):
+                        item.source_path = video_path
+                except Exception as e:
+                    logger.debug("Could not assign fields directly to item object: %s", e)
+
+            # Persist update to store if item has an ID
+            item_id = _extract_field(item, "id") or _extract_field(item, "item_id")
+            if item_id:
+                try:
+                    from clippyme.domain import viral_studio_store
+
+                    viral_studio_store.update_item(
+                        item_id,
+                        {
+                            "ai_copy": copy_obj.model_dump(),
+                            "selected_headline": clean_headline,
+                            "caption": effective_caption,
+                        },
+                    )
+                except Exception as exc:
+                    logger.debug("Could not persist cached copy update to store: %s", exc)
+
+            logger.info("generate_affiliate_copy: Returning cached AICopyData for item")
+            return copy_obj
 
     # 2. Key resolution
+    import os
+
     resolved_api_key = (
         api_key
         or load_persistent_config().get("GEMINI_API_KEY")
+        or os.environ.get("GEMINI_API_KEY", "")
         or ""
     )
     if not resolved_api_key:
@@ -434,7 +560,7 @@ async def generate_affiliate_copy(
         _extract_field(item, "additional_instructions")
         or _extract_field(item, "manual_instructions")
     )
-    default_cta = _extract_field(brand, "default_cta", "Confira os achadinhos no link da bio!")
+    default_cta = _extract_field(brand, "default_cta") or "Confira os achadinhos no link da bio!"
 
     prompt = build_affiliate_copy_prompt(
         brand=brand,
@@ -492,28 +618,37 @@ async def generate_affiliate_copy(
         product_code=product_code,
     )
 
-    # Honor manual headline override if present on item
-    manual_headline = _extract_field(item, "manual_headline")
-    if manual_headline and str(manual_headline).strip():
-        clean_manual = str(manual_headline).strip()
-        copy_data.selected_headline = clean_manual
-        if clean_manual not in copy_data.headlines:
-            copy_data.headlines.insert(0, clean_manual)
+    # 7. Reconcile with existing user edits (preserving custom captions/headlines)
+    effective_selected_headline = (
+        _extract_field(item, "manual_headline")
+        or _extract_field(item, "selected_headline")
+        or copy_data.selected_headline
+    )
+    clean_effective_headline = str(effective_selected_headline or "").strip()
+    if not clean_effective_headline:
+        clean_effective_headline = copy_data.selected_headline or (
+            copy_data.headlines[0] if copy_data.headlines else DEFAULT_FALLBACK_HEADLINES[0]
+        )
+    copy_data.selected_headline = clean_effective_headline[:300]
+    effective_caption = _extract_field(item, "caption") or copy_data.caption
+    copy_data.caption = effective_caption
+    if clean_effective_headline not in copy_data.headlines:
+        copy_data.headlines.insert(0, clean_effective_headline[:300])
+    copy_data.headlines = copy_data.headlines[:10]
 
-    # 7. Cache results on item
     if isinstance(item, dict):
         item["ai_copy"] = copy_data.model_dump()
-        if not item.get("selected_headline"):
-            item["selected_headline"] = copy_data.selected_headline
-        if not item.get("caption"):
-            item["caption"] = copy_data.caption
+        item["selected_headline"] = clean_effective_headline
+        item["caption"] = effective_caption
+        if video_path and not item.get("source_path"):
+            item["source_path"] = video_path
     else:
         try:
             item.ai_copy = copy_data
-            if not getattr(item, "selected_headline", None):
-                item.selected_headline = copy_data.selected_headline
-            if not getattr(item, "caption", None):
-                item.caption = copy_data.caption
+            item.selected_headline = clean_effective_headline
+            item.caption = effective_caption
+            if video_path and not getattr(item, "source_path", None):
+                item.source_path = video_path
         except Exception as e:
             logger.debug("Could not assign ai_copy directly to item object: %s", e)
 
@@ -527,8 +662,8 @@ async def generate_affiliate_copy(
                 item_id,
                 {
                     "ai_copy": copy_data.model_dump(),
-                    "selected_headline": copy_data.selected_headline,
-                    "caption": copy_data.caption,
+                    "selected_headline": clean_effective_headline,
+                    "caption": effective_caption,
                 },
             )
         except Exception as exc:
