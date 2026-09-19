@@ -8,9 +8,12 @@ from __future__ import annotations
 
 import asyncio
 
-from fastapi import APIRouter, status
+from fastapi import APIRouter, Request, Response, status
 
 from clippyme.api.viral_studio_schemas import (
+    BatchCreateRequest,
+    BatchListResponse,
+    BatchResponse,
     BrandCreate,
     BrandListResponse,
     BrandResponse,
@@ -19,6 +22,7 @@ from clippyme.api.viral_studio_schemas import (
     TemplateListResponse,
     TemplateResponse,
     TemplateUpdate,
+    ViralItem,
 )
 from clippyme.domain import viral_studio_store
 
@@ -87,4 +91,56 @@ async def update_template(id: str, payload: TemplateUpdate):
     """Partially update an existing visual template."""
     template = await asyncio.to_thread(viral_studio_store.update_template, id, payload)
     return template
+
+
+# ---------------------------------------------------------------------------
+# Batch & Item Endpoints
+# ---------------------------------------------------------------------------
+
+@router.get("/batches", response_model=BatchListResponse)
+async def list_batches():
+    """List all batches."""
+    batches = await asyncio.to_thread(viral_studio_store.list_batches)
+    return BatchListResponse(batches=batches, total=len(batches))
+
+
+@router.get("/batches/{id}", response_model=BatchResponse)
+async def get_batch(id: str):
+    """Retrieve a single batch with all item statuses."""
+    batch = await asyncio.to_thread(viral_studio_store.get_batch_or_raise, id)
+    return batch
+
+
+@router.post(
+    "/batches",
+    response_model=BatchResponse,
+    status_code=status.HTTP_201_CREATED,
+    responses={
+        202: {"model": BatchResponse, "description": "Batch accepted for background processing"},
+    },
+)
+async def create_batch(
+    payload: BatchCreateRequest,
+    request: Request,
+    response: Response,
+):
+    """Create and persist a new batch of items, enqueuing them in PENDING state."""
+    batch = await asyncio.to_thread(viral_studio_store.create_batch, payload)
+    is_async = (
+        request.headers.get("Prefer") == "respond-async"
+        or request.query_params.get("async") == "true"
+        or (request.headers.get("X-Gemini-Key") and request.query_params.get("async") != "false")
+    )
+    if is_async:
+        response.status_code = status.HTTP_202_ACCEPTED
+    else:
+        response.status_code = status.HTTP_201_CREATED
+    return batch
+
+
+@router.get("/items/{id}", response_model=ViralItem)
+async def get_item(id: str):
+    """Retrieve details and processing status of a single viral item."""
+    item = await asyncio.to_thread(viral_studio_store.get_item_or_raise, id)
+    return item
 

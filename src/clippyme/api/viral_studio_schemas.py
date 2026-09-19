@@ -483,11 +483,92 @@ class ViralItemInput(BaseModel):
         except DomainValidationError as exc:
             raise ValueError(exc.detail) from exc
 
+    @field_validator("product_url")
+    @classmethod
+    def _check_product_url(cls, v: Optional[str]) -> Optional[str]:
+        return validate_affiliate_url(v)
+
 
 class BatchCreateRequest(BaseModel):
-    brand_id: str = Field(..., max_length=64)
+    brand_id: str = Field(..., min_length=1, max_length=64)
     template_id: Optional[str] = Field(None, max_length=64)
     items: List[ViralItemInput] = Field(..., min_length=1, max_length=100)
+
+    @field_validator("brand_id")
+    @classmethod
+    def _clean_brand_id(cls, v: str) -> str:
+        v = (v or "").strip()
+        if not v:
+            raise ValueError("brand_id must not be blank")
+        return v
+
+    @field_validator("template_id")
+    @classmethod
+    def _clean_template_id(cls, v: Optional[str]) -> Optional[str]:
+        if v is None:
+            return None
+        v = v.strip()
+        return v or None
+
+
+class ViralItem(BaseModel):
+    id: str
+    batch_id: Optional[str] = None
+    brand_id: Optional[str] = None
+    source_url: str
+    product_code: Optional[str] = None
+    product_url: Optional[str] = None
+    manual_headline: Optional[str] = None
+    additional_instructions: Optional[str] = None
+    selected_headline: Optional[str] = None
+    caption: Optional[str] = None
+    status: ViralItemStatus = ViralItemStatus.PENDING
+    source_path: Optional[str] = None
+    rendered_path: Optional[str] = None
+    error_message: Optional[str] = None
+    created_at: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
+    updated_at: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
+
+    model_config = ConfigDict(extra="ignore")
+
+
+class BatchResponse(BaseModel):
+    id: str
+    batch_id: str
+    brand_id: str
+    template_id: Optional[str] = None
+    status: str = "PENDING"
+    total_items: int = 0
+    items: List[ViralItem] = Field(default_factory=list)
+    created_at: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
+    updated_at: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
+
+    model_config = ConfigDict(extra="ignore")
+
+    @model_validator(mode="before")
+    @classmethod
+    def _sync_ids_and_totals(cls, values: Any) -> Any:
+        if isinstance(values, dict):
+            bid = values.get("batch_id") or values.get("id")
+            if bid:
+                values["id"] = bid
+                values["batch_id"] = bid
+            if "items" in values and isinstance(values["items"], list):
+                values.setdefault("total_items", len(values["items"]))
+        return values
+
+
+class BatchListResponse(BaseModel):
+    batches: List[BatchResponse] = Field(default_factory=list)
+    total: int = 0
+
+    @model_validator(mode="before")
+    @classmethod
+    def _set_total(cls, values: Any) -> Any:
+        if isinstance(values, dict):
+            if "total" not in values and "batches" in values and isinstance(values["batches"], list):
+                values["total"] = len(values["batches"])
+        return values
 
 
 # ============================================================================

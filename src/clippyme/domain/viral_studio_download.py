@@ -11,21 +11,28 @@ import json
 import os
 import shutil
 import tempfile
+import re
+from collections.abc import Mapping
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
+import uuid
 
 import yt_dlp
 
 from clippyme.domain.errors import DownloadError, ValidationError
 from clippyme.netutil import resolve_host_addresses
 
+SAFE_ID_RE = re.compile(r"^[a-zA-Z0-9_-]{1,128}$")
+
 SUPPORTED_VIRAL_HOSTS = frozenset(
     {
         "instagram.com",
         "www.instagram.com",
         "m.instagram.com",
+        "instagr.am",
+        "www.instagr.am",
         "tiktok.com",
         "www.tiktok.com",
         "m.tiktok.com",
@@ -36,11 +43,37 @@ SUPPORTED_VIRAL_HOSTS = frozenset(
 SOURCE_FILENAME = "source.mp4"
 SOURCE_MANIFEST_FILENAME = "source_manifest.json"
 _FORMAT_LADDER = "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best"
+_VALID_VIDEO_EXTENSIONS = frozenset({".mp4", ".mov", ".webm", ".mkv", ".m4v", ".avi", ".flv", ".ts"})
+_IGNORE_DOWNLOAD_EXTENSIONS = frozenset(
+    {
+        ".part",
+        ".ytdl",
+        ".tmp",
+        ".temp",
+        ".json",
+        ".txt",
+        ".jpg",
+        ".jpeg",
+        ".png",
+        ".webp",
+        ".vtt",
+        ".srt",
+        ".aria2",
+    }
+)
 
 
 def validate_viral_source_url(url: str) -> str:
     """Return a normalized supported URL or raise a domain validation error."""
-    raw = (url or "").strip()
+    if not isinstance(url, str):
+        raise ValidationError("Source URL must be a string")
+    raw = url.strip()
+    if not raw:
+        raise ValidationError("Source URL must not be blank")
+    if any(c.isspace() or ord(c) < 32 or ord(c) == 127 for c in raw):
+        raise ValidationError("Source URL contains invalid whitespace or control characters")
+    if "%00" in raw.lower():
+        raise ValidationError("Source URL contains invalid encoded characters")
     try:
         parsed = urlparse(raw)
         port = parsed.port
@@ -53,6 +86,8 @@ def validate_viral_source_url(url: str) -> str:
         or parsed.username is not None
         or parsed.password is not None
         or port not in (None, 443)
+        or not parsed.path
+        or not parsed.path.strip("/")
     ):
         raise ValidationError("Source URL must be an official HTTPS Instagram or TikTok URL")
     return raw
@@ -65,19 +100,33 @@ def _assert_public_resolution(url: str) -> None:
         raise ValidationError("Source URL has no host")
     try:
         addresses = resolve_host_addresses(host, timeout=5.0)
-    except (OSError, TimeoutError, UnicodeError) as exc:
+    except (OSError, TimeoutError, UnicodeError, ValueError) as exc:
         raise DownloadError("Could not resolve source host") from exc
     if not addresses:
         raise DownloadError("Source host did not resolve to an address")
     for address in addresses:
         ip = ipaddress.ip_address(address)
+        if getattr(ip, "ipv4_mapped", None):
+            mapped = ip.ipv4_mapped
+            if (
+                not mapped.is_global
+                or mapped.is_private
+                or mapped.is_loopback
+                or mapped.is_link_local
+                or mapped.is_reserved
+                or mapped.is_multicast
+                or mapped.is_unspecified
+            ):
+                raise ValidationError("Source URL points to a non-public address")
         if (
-            ip.is_private
+            not ip.is_global
+            or ip.is_private
             or ip.is_loopback
             or ip.is_link_local
             or ip.is_reserved
             or ip.is_multicast
             or ip.is_unspecified
+            or getattr(ip, "is_site_local", False)
         ):
             raise ValidationError("Source URL points to a non-public address")
 
@@ -104,9 +153,13 @@ def _write_manifest(output_path: Path, source: str, *, source_kind: str = "remot
 
 
 def _find_downloaded_file(directory: Path, prefix: str) -> Path | None:
-    candidates = [path for path in directory.glob(f"{prefix}*") if path.is_file()]
+    candidates = [
+        path for path in directory.glob(f"{prefix}*")
+        if path.is_file() and path.suffix.lower() not in _IGNORE_DOWNLOAD_EXTENSIONS
+    ]
     mp4 = [path for path in candidates if path.suffix.lower() == ".mp4"]
-    return (mp4 or candidates or [None])[0]
+    valid_videos = [path for path in candidates if path.suffix.lower() in _VALID_VIDEO_EXTENSIONS]
+    return (mp4 or valid_videos or [None])[0]
 
 
 def download_viral_video(url: str, output_path: str, timeout: int = 120) -> str:
@@ -117,17 +170,22 @@ def download_viral_video(url: str, output_path: str, timeout: int = 120) -> str:
     caller's canonical ``source.mp4`` path.
     """
     source_url = validate_viral_source_url(url)
+    if not output_path or not isinstance(output_path, (str, Path)):
+        raise ValidationError("Download output path must be a non-empty string or Path")
     if not isinstance(timeout, int) or not 1 <= timeout <= 600:
         raise ValidationError("Download timeout must be between 1 and 600 seconds")
     destination = Path(output_path)
     if destination.exists() and destination.is_dir():
         raise ValidationError("Download output path must be a file")
-    destination.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        destination.parent.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        raise DownloadError(f"Could not create download directory: {exc}") from exc
     if destination.is_file() and destination.stat().st_size > 0:
         return str(destination)
 
     _assert_public_resolution(source_url)
-    prefix = ".viral-source-"
+    prefix = f".viral-source-{uuid.uuid4().hex[:8]}-"
     options: dict[str, Any] = {
         "format": _FORMAT_LADDER,
         "outtmpl": str(destination.parent / f"{prefix}%(id)s.%(ext)s"),
@@ -153,7 +211,7 @@ def download_viral_video(url: str, output_path: str, timeout: int = 120) -> str:
     except (ValidationError, DownloadError):
         raise
     except Exception as exc:
-        raise DownloadError("Could not download source video") from exc
+        raise DownloadError(f"Could not download source video: {exc}") from exc
     finally:
         for candidate in destination.parent.glob(f"{prefix}*"):
             if candidate.is_file():
@@ -171,13 +229,20 @@ def preserve_uploaded_source(upload_path: str, output_path: str) -> str:
     copies it into the item's durable source location without retaining a
     partially copied file on failure.
     """
+    if not upload_path or not isinstance(upload_path, (str, Path)):
+        raise ValidationError("Uploaded source path must be a non-empty string or Path")
+    if not output_path or not isinstance(output_path, (str, Path)):
+        raise ValidationError("Download output path must be a non-empty string or Path")
     source = Path(upload_path)
     destination = Path(output_path)
     if not source.is_file() or source.stat().st_size == 0:
         raise ValidationError("Uploaded source must be a non-empty regular file")
     if destination.exists() and destination.is_dir():
         raise ValidationError("Download output path must be a file")
-    destination.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        destination.parent.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        raise ValidationError(f"Cannot create destination directory: {exc}") from exc
     if destination.is_file() and destination.stat().st_size > 0:
         return str(destination)
 
@@ -193,3 +258,96 @@ def preserve_uploaded_source(upload_path: str, output_path: str) -> str:
     finally:
         if os.path.exists(temp_path):
             os.unlink(temp_path)
+
+
+def resolve_source_path(batch_id: str, item_id: str, base_dir: str | None = None) -> str:
+    """Return the canonical path output/viral_studio/<batch_id>/<item_id>/source.mp4."""
+    if not isinstance(batch_id, str) or not SAFE_ID_RE.match(batch_id.strip()):
+        raise ValidationError(f"Invalid batch_id: {batch_id!r}")
+    if not isinstance(item_id, str) or not SAFE_ID_RE.match(item_id.strip()):
+        raise ValidationError(f"Invalid item_id: {item_id!r}")
+    if base_dir is not None and not isinstance(base_dir, (str, Path)):
+        raise ValidationError("base_dir must be a string or Path")
+    clean_batch = batch_id.strip()
+    clean_item = item_id.strip()
+    root = base_dir or os.environ.get("CLIPPYME_OUTPUT_DIR") or "output"
+    return str(Path(root) / "viral_studio" / clean_batch / clean_item / SOURCE_FILENAME)
+
+
+def download_batch_item(
+    batch_id: str,
+    item: Any,
+    base_dir: str | None = None,
+    timeout: int = 120,
+) -> dict[str, Any]:
+    """Download a single batch item's source video into its isolated source.mp4 location.
+
+    If the download fails, isolates the failure by updating the item's status to FAILED
+    and recording the error message without raising or affecting other items.
+    """
+    if not isinstance(item, (dict, Mapping)):
+        return {
+            "id": "unknown",
+            "status": "FAILED",
+            "error_message": f"Invalid item payload: expected dict, got {type(item).__name__}",
+        }
+    updated = dict(item)
+    item_id = updated.get("id") or updated.get("item_id")
+    source_url = updated.get("source_url")
+    if not source_url or not item_id:
+        updated["status"] = "FAILED"
+        updated["error_message"] = "Missing source_url or item id"
+        return updated
+
+    try:
+        destination = resolve_source_path(batch_id, str(item_id), base_dir)
+        saved_path = download_viral_video(source_url, destination, timeout=timeout)
+        updated["source_path"] = saved_path
+        updated["status"] = "READY_FOR_REVIEW"
+        updated["error_message"] = None
+    except Exception as exc:
+        updated["status"] = "FAILED"
+        updated["error_message"] = str(exc)
+    return updated
+
+
+def download_batch_items(
+    batch_id: str,
+    items: list[dict[str, Any]],
+    base_dir: str | None = None,
+    timeout: int = 120,
+) -> list[dict[str, Any]]:
+    """Download source videos for a batch of items with strict failure isolation.
+
+    Iterates through each item independently; any failure in one item is trapped
+    and sets that item to FAILED with error_message, while all other items continue
+    processing normally.
+    """
+    if not isinstance(items, (list, tuple)):
+        return []
+    results: list[dict[str, Any]] = []
+    for item in items:
+        processed = download_batch_item(batch_id, item, base_dir=base_dir, timeout=timeout)
+        results.append(processed)
+    return results
+
+
+def process_batch_downloads(
+    batch_id: str,
+    base_dir: str | None = None,
+    timeout: int = 120,
+) -> dict[str, Any]:
+    """Load batch from store, download items with failure isolation, and update store."""
+    from clippyme.domain import viral_studio_store
+
+    batch = viral_studio_store.get_batch_or_raise(batch_id)
+    items = batch.get("items", [])
+    updated_items = download_batch_items(batch_id, items, base_dir=base_dir, timeout=timeout)
+    for it in updated_items:
+        it_id = it.get("id") or it.get("item_id")
+        if it_id:
+            viral_studio_store.update_item(it_id, it)
+    all_failed = all(it.get("status") == "FAILED" for it in updated_items) if updated_items else False
+    new_status = "FAILED" if all_failed else "READY_FOR_REVIEW"
+    viral_studio_store.update_batch(batch_id, {"status": new_status})
+    return viral_studio_store.get_batch_or_raise(batch_id)

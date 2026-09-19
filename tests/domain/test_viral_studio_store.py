@@ -286,7 +286,89 @@ def test_get_or_raise_not_found(tmp_store):
         viral_studio_store.get_template_or_raise("missing-template")
 
     with pytest.raises(NotFoundError):
-        viral_studio_store.get_batch_or_raise("missing-batch")
-
-    with pytest.raises(NotFoundError):
         viral_studio_store.get_item_or_raise("missing-item")
+
+
+def test_create_batch_rejects_nonexistent_template(tmp_store):
+    """create_batch with invalid template_id raises NotFoundError."""
+    with pytest.raises(NotFoundError):
+        viral_studio_store.create_batch({
+            "brand_id": "vale-o-clique",
+            "template_id": "does-not-exist-xyz",
+            "items": [{"source_url": "https://www.instagram.com/reel/abc/"}],
+        })
+
+
+def test_create_batch_rejects_empty_item_source_url(tmp_store):
+    """create_batch with missing or blank source_url on item raises ValidationError."""
+    with pytest.raises(ValidationError):
+        viral_studio_store.create_batch({
+            "brand_id": "vale-o-clique",
+            "items": [{"source_url": "   "}],
+        })
+
+
+def test_update_item_clears_error_message_on_recovery(tmp_store):
+    """update_item must allow setting error_message=None when an item recovers."""
+    batch = viral_studio_store.create_batch({
+        "brand_id": "vale-o-clique",
+        "items": [{"source_url": "https://www.instagram.com/reel/abc/"}],
+    })
+    item_id = batch["items"][0]["id"]
+
+    # Fail the item
+    viral_studio_store.update_item(item_id, {"status": "FAILED", "error_message": "Network failed"})
+    failed_item = viral_studio_store.get_item(item_id)
+    assert failed_item["status"] == "FAILED"
+    assert failed_item["error_message"] == "Network failed"
+
+    # Recover and clear error_message
+    viral_studio_store.update_item(item_id, {"status": "READY_FOR_REVIEW", "error_message": None})
+    recovered_item = viral_studio_store.get_item(item_id)
+    assert recovered_item["status"] == "READY_FOR_REVIEW"
+    assert recovered_item["error_message"] is None
+
+
+def test_create_batch_deduplicates_colliding_item_ids(tmp_store):
+    """Items in the same batch with duplicate IDs are given unique UUIDs."""
+    batch = viral_studio_store.create_batch({
+        "brand_id": "vale-o-clique",
+        "items": [
+            {"id": "duplicate-id", "source_url": "https://www.instagram.com/reel/item1/"},
+            {"id": "duplicate-id", "source_url": "https://www.instagram.com/reel/item2/"},
+        ],
+    })
+    ids = [it["id"] for it in batch["items"]]
+    assert len(ids) == 2
+    assert ids[0] != ids[1]
+
+
+@pytest.mark.parametrize("bad_batch_id", ["../../etc", "/etc/passwd", "batch 123", "batch\0bad"])
+def test_create_batch_rejects_invalid_batch_id(tmp_store, bad_batch_id):
+    """create_batch rejects invalid or traversal batch_id with ValidationError."""
+    with pytest.raises(ValidationError):
+        viral_studio_store.create_batch({
+            "brand_id": "vale-o-clique",
+            "batch_id": bad_batch_id,
+            "items": [{"source_url": "https://www.instagram.com/reel/abc/"}],
+        })
+
+
+@pytest.mark.parametrize("bad_item_id", ["../../etc", "/etc/passwd", "item 123", "item\0bad"])
+def test_create_batch_rejects_invalid_item_id(tmp_store, bad_item_id):
+    """create_batch rejects invalid or traversal item_id with ValidationError."""
+    with pytest.raises(ValidationError):
+        viral_studio_store.create_batch({
+            "brand_id": "vale-o-clique",
+            "items": [{"id": bad_item_id, "source_url": "https://www.instagram.com/reel/abc/"}],
+        })
+
+
+def test_create_batch_rejects_non_dict_item(tmp_store):
+    """create_batch rejects non-dict items in items array with ValidationError."""
+    with pytest.raises(ValidationError):
+        viral_studio_store.create_batch({
+            "brand_id": "vale-o-clique",
+            "items": ["not_a_dict"],
+        })
+

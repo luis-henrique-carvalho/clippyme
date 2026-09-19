@@ -353,3 +353,264 @@ def test_create_brand_safe_asset_paths_accepted(api_client):
         assert resp.status_code == 201, f"Failed for path {path}: {resp.text}"
         assert resp.json()["avatar_path"] == path
 
+
+def test_create_batch_returns_201_with_pending_items(api_client):
+    """POST /api/viral-studio/batches with 3 items returns 201 and items in PENDING state."""
+    # Ensure brand exists
+    api_client.post(
+        "/api/viral-studio/brands",
+        json={
+            "id": "batch-brand-201",
+            "name": "Batch Brand 201",
+            "handle": "@batchbrand201",
+            "template_id": "classic-affiliate",
+        },
+    )
+
+    batch_payload = {
+        "brand_id": "batch-brand-201",
+        "items": [
+            {
+                "source_url": "https://www.instagram.com/reel/C_ITEM1/",
+                "product_code": "PROD_1",
+                "product_url": "https://example.com/item1",
+                "manual_headline": "Headline 1",
+            },
+            {
+                "source_url": "https://www.tiktok.com/@creator/video/123456",
+                "product_code": "PROD_2",
+                "additional_instructions": "Highlight ease of use",
+            },
+            {
+                "source_url": "https://vm.tiktok.com/shortcode3/",
+                "product_code": "PROD_3",
+            },
+        ],
+    }
+    resp = api_client.post("/api/viral-studio/batches", json=batch_payload)
+    assert resp.status_code == 201, resp.text
+    data = resp.json()
+
+    assert "id" in data
+    assert "batch_id" in data
+    assert data["id"] == data["batch_id"]
+    assert data["brand_id"] == "batch-brand-201"
+    assert data["status"] == "PENDING"
+    assert data["total_items"] == 3
+    assert len(data["items"]) == 3
+
+    for idx, item in enumerate(data["items"]):
+        assert item["id"] is not None
+        assert item["batch_id"] == data["id"]
+        assert item["brand_id"] == "batch-brand-201"
+        assert item["status"] == "PENDING"
+        assert item["error_message"] is None
+        assert item["created_at"] is not None
+        assert item["updated_at"] is not None
+
+    assert data["items"][0]["product_code"] == "PROD_1"
+    assert data["items"][1]["product_code"] == "PROD_2"
+    assert data["items"][2]["product_code"] == "PROD_3"
+
+
+def test_get_batch_by_id(api_client):
+    """GET /api/viral-studio/batches/{id} returns batch metadata and per-item status."""
+    api_client.post(
+        "/api/viral-studio/brands",
+        json={"id": "get-batch-brand", "name": "Get Batch Brand", "handle": "@getbatch"},
+    )
+    create_resp = api_client.post(
+        "/api/viral-studio/batches",
+        json={
+            "brand_id": "get-batch-brand",
+            "items": [
+                {"source_url": "https://www.instagram.com/reel/C_GET1/", "product_code": "G1"},
+                {"source_url": "https://www.tiktok.com/@creator/video/789", "product_code": "G2"},
+            ],
+        },
+    )
+    assert create_resp.status_code == 201
+    created = create_resp.json()
+    batch_id = created["id"]
+
+    get_resp = api_client.get(f"/api/viral-studio/batches/{batch_id}")
+    assert get_resp.status_code == 200
+    fetched = get_resp.json()
+    assert fetched["id"] == batch_id
+    assert fetched["brand_id"] == "get-batch-brand"
+    assert fetched["total_items"] == 2
+    assert len(fetched["items"]) == 2
+    assert fetched["items"][0]["status"] == "PENDING"
+    assert fetched["items"][1]["status"] == "PENDING"
+
+
+def test_get_item_by_id(api_client):
+    """GET /api/viral-studio/items/{id} returns individual item metadata."""
+    api_client.post(
+        "/api/viral-studio/brands",
+        json={"id": "item-query-brand", "name": "Item Query Brand", "handle": "@itemquery"},
+    )
+    create_resp = api_client.post(
+        "/api/viral-studio/batches",
+        json={
+            "brand_id": "item-query-brand",
+            "items": [
+                {"source_url": "https://www.instagram.com/reel/C_SINGLE/", "product_code": "SINGLE_01"},
+            ],
+        },
+    )
+    assert create_resp.status_code == 201
+    item_id = create_resp.json()["items"][0]["id"]
+
+    item_resp = api_client.get(f"/api/viral-studio/items/{item_id}")
+    assert item_resp.status_code == 200
+    item_data = item_resp.json()
+    assert item_data["id"] == item_id
+    assert item_data["brand_id"] == "item-query-brand"
+    assert item_data["product_code"] == "SINGLE_01"
+    assert item_data["status"] == "PENDING"
+
+
+def test_create_batch_empty_items_rejected(api_client):
+    """POST /api/viral-studio/batches with empty items list returns 422."""
+    api_client.post(
+        "/api/viral-studio/brands",
+        json={"id": "empty-items-brand", "name": "Empty Items Brand", "handle": "@emptyitems"},
+    )
+    resp = api_client.post(
+        "/api/viral-studio/batches",
+        json={"brand_id": "empty-items-brand", "items": []},
+    )
+    assert resp.status_code in (400, 422)
+
+
+def test_create_batch_invalid_url_rejected(api_client):
+    """POST /api/viral-studio/batches with non-allowlisted domain returns 422."""
+    api_client.post(
+        "/api/viral-studio/brands",
+        json={"id": "bad-url-brand", "name": "Bad URL Brand", "handle": "@badurl"},
+    )
+    resp = api_client.post(
+        "/api/viral-studio/batches",
+        json={
+            "brand_id": "bad-url-brand",
+            "items": [{"source_url": "https://youtube.com/watch?v=12345"}],
+        },
+    )
+    assert resp.status_code in (400, 422)
+
+
+def test_create_batch_ssrf_url_rejected(api_client):
+    """POST /api/viral-studio/batches with private IP source URL returns 422."""
+    api_client.post(
+        "/api/viral-studio/brands",
+        json={"id": "ssrf-batch-brand", "name": "SSRF Batch Brand", "handle": "@ssrfbatch"},
+    )
+    for bad_ssrf in ["http://127.0.0.1:8000/exploit", "http://169.254.169.254/meta"]:
+        resp = api_client.post(
+            "/api/viral-studio/batches",
+            json={
+                "brand_id": "ssrf-batch-brand",
+                "items": [{"source_url": bad_ssrf}],
+            },
+        )
+        assert resp.status_code in (400, 422)
+
+
+def test_create_batch_ssrf_product_url_rejected(api_client):
+    """POST /api/viral-studio/batches with private IP product_url returns 422."""
+    api_client.post(
+        "/api/viral-studio/brands",
+        json={"id": "ssrf-prod-brand", "name": "SSRF Prod Brand", "handle": "@ssrfprod"},
+    )
+    resp = api_client.post(
+        "/api/viral-studio/batches",
+        json={
+            "brand_id": "ssrf-prod-brand",
+            "items": [
+                {
+                    "source_url": "https://www.instagram.com/reel/C_OKAY/",
+                    "product_url": "http://127.0.0.1:8000/internal",
+                }
+            ],
+        },
+    )
+    assert resp.status_code in (400, 422)
+
+
+def test_create_batch_nonexistent_brand_returns_404(api_client):
+    """POST /api/viral-studio/batches with unknown brand_id returns 404."""
+    resp = api_client.post(
+        "/api/viral-studio/batches",
+        json={
+            "brand_id": "brand-does-not-exist-at-all",
+            "items": [{"source_url": "https://www.instagram.com/reel/C_OKAY/"}],
+        },
+    )
+    assert resp.status_code == 404
+    assert "not found" in resp.json()["detail"].lower()
+
+
+def test_get_nonexistent_batch_returns_404(api_client):
+    """GET /api/viral-studio/batches/{id} with missing ID returns 404."""
+    resp = api_client.get("/api/viral-studio/batches/missing-batch-99999")
+    assert resp.status_code == 404
+
+
+def test_get_nonexistent_item_returns_404(api_client):
+    """GET /api/viral-studio/items/{id} with missing ID returns 404."""
+    resp = api_client.get("/api/viral-studio/items/missing-item-99999")
+    assert resp.status_code == 404
+
+
+def test_list_batches(api_client):
+    """GET /api/viral-studio/batches returns all created batches."""
+    api_client.post(
+        "/api/viral-studio/brands",
+        json={"id": "list-batches-brand", "name": "List Batches", "handle": "@listbatches"},
+    )
+    api_client.post(
+        "/api/viral-studio/batches",
+        json={
+            "brand_id": "list-batches-brand",
+            "items": [{"source_url": "https://www.instagram.com/reel/C_BATCH1/"}],
+        },
+    )
+    resp = api_client.get("/api/viral-studio/batches")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert "batches" in data
+    assert data["total"] >= 1
+    assert any(b["brand_id"] == "list-batches-brand" for b in data["batches"])
+
+
+def test_create_batch_whitespace_brand_id_rejected(api_client):
+    """POST /api/viral-studio/batches with whitespace-only brand_id returns 422."""
+    resp = api_client.post(
+        "/api/viral-studio/batches",
+        json={
+            "brand_id": "   ",
+            "items": [{"source_url": "https://www.instagram.com/reel/C_BATCH1/"}],
+        },
+    )
+    assert resp.status_code in (400, 422)
+
+
+def test_create_batch_nonexistent_template_returns_404(api_client):
+    """POST /api/viral-studio/batches with missing template_id returns 404."""
+    api_client.post(
+        "/api/viral-studio/brands",
+        json={"id": "valid-b-id", "name": "Valid Brand", "handle": "@validb"},
+    )
+    resp = api_client.post(
+        "/api/viral-studio/batches",
+        json={
+            "brand_id": "valid-b-id",
+            "template_id": "nonexistent-tmpl-99999",
+            "items": [{"source_url": "https://www.instagram.com/reel/C_BATCH1/"}],
+        },
+    )
+    assert resp.status_code == 404
+    assert "not found" in resp.json()["detail"].lower()
+
+

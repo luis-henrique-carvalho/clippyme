@@ -19,6 +19,7 @@ import re
 import tempfile
 import threading
 import unicodedata
+import uuid
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Union
 
@@ -28,6 +29,7 @@ logger = logging.getLogger("clippyme.viral_studio_store")
 
 SAFE_ASSET_PREFIXES = ("uploads/", "data/")
 SAFE_FILENAME_RE = re.compile(r"^[a-zA-Z0-9_.-]+$")
+SAFE_ID_RE = re.compile(r"^[a-zA-Z0-9_-]{1,128}$")
 
 
 def _slugify(text: str) -> str:
@@ -552,22 +554,78 @@ def get_batch_or_raise(batch_id: str) -> Dict[str, Any]:
 
 def create_batch(batch: Union[Dict[str, Any], Any]) -> Dict[str, Any]:
     data = _to_dict(batch)
-    batch_id = data.get("batch_id") or data.get("id")
-    if not batch_id:
-        raise ValidationError("batch_id is required")
-    data["batch_id"] = batch_id
-    if "id" not in data:
-        data["id"] = batch_id
+    brand_id = data.get("brand_id")
+    if not brand_id or not str(brand_id).strip():
+        raise ValidationError("brand_id is required")
+
+    raw_items = data.get("items")
+    if not raw_items or not isinstance(raw_items, list) or len(raw_items) == 0:
+        raise ValidationError("Batch must contain at least one item")
 
     with _STORE_LOCK:
+        brands = _load_brands_locked()
+        if brand_id not in brands:
+            raise NotFoundError(f"Brand not found: {brand_id}")
+
+        batch_id = data.get("batch_id") or data.get("id")
+        if not batch_id or not str(batch_id).strip():
+            batch_id = str(uuid.uuid4())
+        else:
+            clean_batch_id = str(batch_id).strip()
+            if not SAFE_ID_RE.match(clean_batch_id):
+                raise ValidationError(f"Invalid batch_id: {clean_batch_id!r}")
+            batch_id = clean_batch_id
+
+        data["batch_id"] = batch_id
+        data["id"] = batch_id
+
         batches = _load_batches_locked()
         if batch_id in batches:
             raise ConflictError(f"Batch already exists: {batch_id}")
 
+        brand = brands[brand_id]
+        template_id = data.get("template_id") or brand.get("template_id") or DEFAULT_TEMPLATE_ID
+        templates = _load_templates_locked()
+        if template_id not in templates:
+            raise NotFoundError(f"Template not found: {template_id}")
+        data["template_id"] = template_id
+
         now = _utcnow_iso()
         data.setdefault("created_at", now)
         data["updated_at"] = now
-        data.setdefault("items", [])
+        data["status"] = data.get("status") or "PENDING"
+
+        seen_item_ids = set()
+        processed_items = []
+        for raw_item in raw_items:
+            if not isinstance(raw_item, dict) and not hasattr(raw_item, "__dict__"):
+                raise ValidationError("Each item in items must be an object/dictionary")
+            item = _to_dict(raw_item)
+            if not item.get("source_url") or not str(item.get("source_url")).strip():
+                raise ValidationError("Each item must have a non-empty source_url")
+            item_id = item.get("id") or item.get("item_id")
+            if not item_id or not str(item_id).strip() or str(item_id).strip() in seen_item_ids:
+                item_id = str(uuid.uuid4())
+            else:
+                clean_item_id = str(item_id).strip()
+                if not SAFE_ID_RE.match(clean_item_id):
+                    raise ValidationError(f"Invalid item_id: {clean_item_id!r}")
+                item_id = clean_item_id
+            seen_item_ids.add(item_id)
+            item["id"] = item_id
+            item["item_id"] = item_id
+            item["batch_id"] = batch_id
+            item["brand_id"] = brand_id
+            item.setdefault("status", "PENDING")
+            item.setdefault("source_path", None)
+            item.setdefault("rendered_path", None)
+            item.setdefault("error_message", None)
+            item.setdefault("created_at", now)
+            item.setdefault("updated_at", now)
+            processed_items.append(item)
+
+        data["items"] = processed_items
+        data["total_items"] = len(processed_items)
 
         batches[batch_id] = data
         _atomic_write_json(get_batches_path(), batches)
@@ -657,7 +715,17 @@ def update_item(item_id: str, updates: Union[Dict[str, Any], Any]) -> Dict[str, 
                     for k, v in patch.items():
                         if k in ("id", "item_id", "batch_id", "created_at"):
                             continue
-                        if v is not None:
+                        if v is not None or k in (
+                            "error_message",
+                            "source_path",
+                            "rendered_path",
+                            "manual_headline",
+                            "additional_instructions",
+                            "selected_headline",
+                            "caption",
+                            "product_url",
+                            "product_code",
+                        ):
                             item[k] = v
                     item["updated_at"] = _utcnow_iso()
                     batch["items"][idx] = item
