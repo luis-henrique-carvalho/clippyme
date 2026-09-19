@@ -41,3 +41,9 @@ class ComposeError(ClippyMeError):
     """A compose/render step failed (maps to 400 by default)."""
 
     status_code = 400
+
+
+class DownloadError(ClippyMeError):
+    """A remote source could not be resolved or downloaded."""
+
+    status_code = 400

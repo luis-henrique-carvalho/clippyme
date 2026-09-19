@@ -18,6 +18,7 @@ from clippyme.domain.errors import ValidationError as DomainValidationError
 from clippyme.domain.viral_studio_store import (
     validate_safe_asset_path as _store_validate_asset_path,
 )
+from clippyme.domain.viral_studio_download import validate_viral_source_url
 
 HEX_COLOR_RE = re.compile(r"^#(?:[0-9a-fA-F]{3}|[0-9a-fA-F]{6}|[0-9a-fA-F]{8})$")
 SLUG_RE = re.compile(r"^[a-zA-Z0-9_-]{1,64}$")
@@ -473,6 +474,14 @@ class ViralItemInput(BaseModel):
     product_url: Optional[str] = Field(None, max_length=2048)
     manual_headline: Optional[str] = Field(None, max_length=300)
     additional_instructions: Optional[str] = Field(None, max_length=1000)
+
+    @field_validator("source_url")
+    @classmethod
+    def _check_source_url(cls, v: str) -> str:
+        try:
+            return validate_viral_source_url(v)
+        except DomainValidationError as exc:
+            raise ValueError(exc.detail) from exc
 
 
 class BatchCreateRequest(BaseModel):
