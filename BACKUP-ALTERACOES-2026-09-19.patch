@@ -1,0 +1,312 @@
+From 9511b2ec4091ae4ef4ce4c2cc1eb7abc2edfab46 Mon Sep 17 00:00:00 2001
+From: luis-henrique-carvalho <luisdev9225@gmail.com>
+Date: Sat, 19 Sep 2026 00:51:21 -0300
+Subject: [PATCH] =?UTF-8?q?backup:=20preservar=20altera=C3=A7=C3=B5es=20an?=
+ =?UTF-8?q?tes=20da=20formata=C3=A7=C3=A3o?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+---
+ Dockerfile.rocm                        | 55 ++++++++++++++++++++++++++
+ docker-compose.rocm.yml                | 25 ++++++++++++
+ src/clippyme/api/app.py                |  3 +-
+ src/clippyme/domain/clip_endpoints.py  |  5 ++-
+ src/clippyme/domain/history_service.py |  3 +-
+ src/clippyme/domain/job_results.py     |  3 +-
+ src/clippyme/domain/reframe_service.py |  3 +-
+ src/clippyme/domain/url_utils.py       | 27 ++++++++-----
+ tests/api/test_ssrf_and_traversal.py   |  9 ++++-
+ 9 files changed, 116 insertions(+), 17 deletions(-)
+ create mode 100644 Dockerfile.rocm
+ create mode 100644 docker-compose.rocm.yml
+
+diff --git a/Dockerfile.rocm b/Dockerfile.rocm
+new file mode 100644
+index 0000000..43d93dd
+--- /dev/null
++++ b/Dockerfile.rocm
+@@ -0,0 +1,55 @@
++# ClippyMe AMD/ROCm image.  This is deliberately separate from Dockerfile so
++# the default compose command remains the portable CPU configuration.
++FROM rocm/pytorch:rocm7.2.1_ubuntu24.04_py3.12_pytorch_release_2.9.1
++
++ENV DEBIAN_FRONTEND=noninteractive
++ENV TZ=Etc/UTC
++ENV PYTHONUNBUFFERED=1
++ENV PATH=/app/data/bin:$PATH
++
++RUN apt-get update && \
++    apt-get install -y --no-install-recommends \
++      ffmpeg libgl1 libglib2.0-0 libsm6 libxext6 libxrender1 libcairo2 \
++      curl unzip ca-certificates gosu && \
++    curl -fsSL https://deno.land/install.sh | sh -s v2.8.3 && \
++    mv /root/.deno/bin/deno /usr/local/bin/ && \
++    rm -rf /root/.deno /var/lib/apt/lists/* && \
++    AE_VERSION=30.5.0 && \
++    ARCH=$(uname -m) && \
++    case "$ARCH" in \
++      x86_64) AE_ASSET=auto-editor-linux-x86_64; AE_SHA=673e69b096d740736364f34669e864505294441f5ec9188642b33e24b07cf147 ;; \
++      aarch64) AE_ASSET=auto-editor-linux-aarch64; AE_SHA=0c54d2cbc617fd369dae434eb62156557877da47c60fd8b2018b65b481166a4e ;; \
++      *) echo "Unsupported architecture: $ARCH"; exit 1 ;; \
++    esac && \
++    curl -fsSL -o /usr/local/bin/auto-editor \
++      "https://github.com/WyattBlue/auto-editor/releases/download/${AE_VERSION}/$AE_ASSET" && \
++    echo "$AE_SHA  /usr/local/bin/auto-editor" | sha256sum -c - && \
++    chmod +x /usr/local/bin/auto-editor
++
++WORKDIR /app
++
++# The base image already contains ROCm-enabled PyTorch.  Keep it intact instead
++# of letting the CPU/CUDA pins from ClippyMe's lock replace it.
++COPY requirements.lock requirements.txt requirements-runtime-tools.txt ./
++RUN sed -E '/^(torch|torchvision|torchaudio|triton|nvidia-[A-Za-z0-9_-]+)==/d' requirements.lock > requirements.rocm.lock && \
++    pip install --upgrade pip && \
++    pip install -r requirements.rocm.lock -r requirements-runtime-tools.txt
++
++RUN groupadd -r appuser && useradd -r -g appuser -d /app -s /sbin/nologin appuser && \
++    mkdir -p /app/uploads /app/output /app/data /app/data/bin /tmp/Ultralytics && \
++    chown -R appuser:appuser /app /tmp/Ultralytics
++
++COPY --chown=appuser:appuser . .
++RUN pip install --no-cache-dir -e .
++
++USER appuser
++RUN python -c "from ultralytics import YOLO; YOLO('yolov8n.pt')"
++
++USER root
++COPY --chmod=0755 docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
++ENTRYPOINT ["/usr/local/bin/docker-entrypoint.sh"]
++
++EXPOSE 8000
++HEALTHCHECK --interval=30s --timeout=10s --start-period=20s --retries=3 \
++  CMD curl -f http://localhost:8000/ || exit 1
++CMD ["uvicorn", "clippyme.api.app:app", "--host", "0.0.0.0", "--port", "8000"]
+diff --git a/docker-compose.rocm.yml b/docker-compose.rocm.yml
+new file mode 100644
+index 0000000..f503c17
+--- /dev/null
++++ b/docker-compose.rocm.yml
+@@ -0,0 +1,25 @@
++# Optional AMD ROCm override. Start with:
++#   sg docker -c 'docker compose -f docker-compose.yml -f docker-compose.rocm.yml up -d --build'
++# The default `docker compose up -d` remains the CPU profile.
++services:
++  backend:
++    build:
++      context: .
++      dockerfile: Dockerfile.rocm
++    image: clippyme-backend-rocm
++    devices:
++      - /dev/kfd
++      - /dev/dri
++    # /dev/kfd and renderD128 belong to the host's render group (GID 110).
++    # Numeric GID works even when the image has no group named "render".
++    group_add:
++      - "110"
++    security_opt:
++      - seccomp:unconfined
++    cap_add:
++      - SYS_PTRACE
++    ipc: host
++    shm_size: 8gb
++    environment:
++      HIP_VISIBLE_DEVICES: "0"
++      ROCR_VISIBLE_DEVICES: "0"
+diff --git a/src/clippyme/api/app.py b/src/clippyme/api/app.py
+index 3851593..b7970fd 100644
+--- a/src/clippyme/api/app.py
++++ b/src/clippyme/api/app.py
+@@ -37,6 +37,7 @@ from clippyme.domain.errors import ClippyMeError
+ from clippyme.domain.uploads import stream_upload_within_limit, FileTooLarge
+ from clippyme.domain.clip_endpoints import run_smart_cut, restore_job_from_disk
+ from clippyme.domain.clip_resolve import resolve_clip
++from clippyme.domain.url_utils import video_url
+ from clippyme.domain import job_control
+ from clippyme.domain.job_actions import cancel_job_action, stop_job_action
+ from clippyme.domain.job_journal import JOURNAL_FILENAME, make_journal_writer, recover_jobs
+@@ -806,7 +807,7 @@ async def compose_clip(job_id: str, clip_index: int, req: ComposeRequest, reques
+             banner_params=req.banner_params,
+             drop_ranges=req.drop_ranges,
+         )
+-        return {"composed_url": f"/videos/{job_id}/{composed_filename}"}
++        return {"composed_url": video_url(job_id, composed_filename)}
+     except (HTTPException, ClippyMeError):
+         raise
+     except Exception as e:
+diff --git a/src/clippyme/domain/clip_endpoints.py b/src/clippyme/domain/clip_endpoints.py
+index 78b7f6d..ecc43bd 100644
+--- a/src/clippyme/domain/clip_endpoints.py
++++ b/src/clippyme/domain/clip_endpoints.py
+@@ -8,6 +8,7 @@ import os
+ from clippyme.domain.clip_resolve import ResolvedClip, clip_filename_for
+ from clippyme.domain.errors import ClippyMeError, NotFoundError, ValidationError
+ from clippyme.domain.smartcut import smart_cut
++from clippyme.domain.url_utils import video_url
+ 
+ logger = logging.getLogger(__name__)
+ 
+@@ -52,7 +53,7 @@ async def run_smart_cut(
+         smartcut_filename = os.path.basename(result_path)
+         return {
+             "success": True,
+-            "new_video_url": f"/videos/{job_id}/{smartcut_filename}",
++            "new_video_url": video_url(job_id, smartcut_filename),
+             "stats": stats,
+         }
+     except ClippyMeError:
+@@ -95,7 +96,7 @@ def restore_job_from_disk(job_id: str, output_dir: str, job_dir: str) -> dict:
+         # Store the clean URL back — strip any stale ?v= cache-bust so
+         # downstream consumers (publish, smartcut, compose) never have to
+         # defensively split on `?` again.
+-        clip["video_url"] = f"/videos/{job_id}/{clip_filename}"
++        clip["video_url"] = video_url(job_id, clip_filename)
+         clip["original_index"] = i
+         present.append(clip)
+ 
+diff --git a/src/clippyme/domain/history_service.py b/src/clippyme/domain/history_service.py
+index de75fdb..0846007 100644
+--- a/src/clippyme/domain/history_service.py
++++ b/src/clippyme/domain/history_service.py
+@@ -7,6 +7,7 @@ import re
+ from typing import List
+ 
+ from clippyme.domain.clip_resolve import clip_filename_for
++from clippyme.domain.url_utils import video_url
+ 
+ logger = logging.getLogger("clippyme")
+ 
+@@ -62,7 +63,7 @@ def scan_history(output_dir: str) -> List[dict]:
+                     if os.path.exists(clip_path):
+                         clip_files.append(
+                             {
+-                                "video_url": f"/videos/{entry}/{clip_filename}",
++                                "video_url": video_url(entry, clip_filename),
+                                 "title": clip.get("video_title_for_youtube_short", ""),
+                                 "start": clip.get("start", 0),
+                                 "end": clip.get("end", 0),
+diff --git a/src/clippyme/domain/job_results.py b/src/clippyme/domain/job_results.py
+index 9c91709..4a90f98 100644
+--- a/src/clippyme/domain/job_results.py
++++ b/src/clippyme/domain/job_results.py
+@@ -8,6 +8,7 @@ import os
+ import re
+ 
+ from clippyme.domain.clip_resolve import clip_filename_for
++from clippyme.domain.url_utils import video_url
+ from clippyme.pipeline.reframe_ops import normalize_letterbox_zoom
+ from clippyme.domain.runtime_state import runtime_result_fields
+ 
+@@ -153,7 +154,7 @@ def _build_clips(data: dict, base_name: str, job_id: str, output_dir: str, only_
+         exists = os.path.exists(clip_path) and os.path.getsize(clip_path) > 0
+         if only_ready and not exists:
+             continue
+-        clip["video_url"] = f"/videos/{job_id}/{clip_filename}"
++        clip["video_url"] = video_url(job_id, clip_filename)
+         clip["original_index"] = index
+         result.append(clip)
+     return result
+diff --git a/src/clippyme/domain/reframe_service.py b/src/clippyme/domain/reframe_service.py
+index 56658fe..1271bcf 100644
+--- a/src/clippyme/domain/reframe_service.py
++++ b/src/clippyme/domain/reframe_service.py
+@@ -16,6 +16,7 @@ from clippyme.domain.clip_locks import clip_lock
+ from clippyme.domain.clip_resolve import clip_filename_for
+ from clippyme.domain.errors import ClippyMeError, NotFoundError
+ from clippyme.domain.job_artifacts import load_job_metadata, save_job_metadata
++from clippyme.domain.url_utils import video_url
+ from clippyme.pipeline.reframe_ops import normalize_letterbox_zoom
+ from clippyme.storage.config_store import load_persistent_config
+ 
+@@ -135,7 +136,7 @@ async def run_reframe(*, job_id: str, clip_index: int, mode: str,
+         # on upload. Keep the clean path in metadata and append cache-bust
+         # only in the HTTP response, which is what the <video> element sees.
+         cache_bust = int(time.time())
+-        clean_video_url = f"/videos/{job_id}/{original_clip_filename}"
++        clean_video_url = video_url(job_id, original_clip_filename)
+         new_video_url = f"{clean_video_url}?v={cache_bust}"
+ 
+         # Update in-memory metadata structures with the CLEAN url, then persist.
+diff --git a/src/clippyme/domain/url_utils.py b/src/clippyme/domain/url_utils.py
+index cb39b29..62781bb 100644
+--- a/src/clippyme/domain/url_utils.py
++++ b/src/clippyme/domain/url_utils.py
+@@ -1,4 +1,4 @@
+-"""URL helpers for resolving disk filenames from video_url references.
++"""URL helpers for safely building and resolving clip video URLs.
+ 
+ All backend consumers that need to turn a clip's ``video_url`` into a
+ filesystem path should go through :func:`filename_from_video_url` so
+@@ -13,6 +13,18 @@ introduced this module.
+ from __future__ import annotations
+ 
+ from typing import Optional
++from urllib.parse import quote, unquote, urlsplit
++
++
++def video_url(job_id: str, filename: str) -> str:
++    """Build a browser-safe URL for a video stored in a job directory.
++
++    Clip filenames are derived from source titles and may contain ``#``,
++    spaces, accents, or other reserved URL characters.  Quote each path
++    component so browsers request the complete filename rather than treating
++    (for example) ``#014`` as a URL fragment.
++    """
++    return f"/videos/{quote(str(job_id), safe='')}/{quote(str(filename), safe='')}"
+ 
+ 
+ def filename_from_video_url(video_url: Optional[str]) -> str:
+@@ -39,14 +51,9 @@ def filename_from_video_url(video_url: Optional[str]) -> str:
+     """
+     if not video_url or not isinstance(video_url, str):
+         return ""
+-    # Strip whitespace first
+-    cleaned = video_url.strip()
+-    # Drop fragment
+-    if "#" in cleaned:
+-        cleaned = cleaned.split("#", 1)[0]
+-    # Drop query string
+-    if "?" in cleaned:
+-        cleaned = cleaned.split("?", 1)[0]
++    # urlsplit removes query strings/fragments from an already-valid URL, and
++    # unquote restores the on-disk filename for paths generated by video_url.
++    cleaned = unquote(urlsplit(video_url.strip()).path)
+     # Normalize trailing slashes
+     cleaned = cleaned.rstrip("/\\")
+     if not cleaned:
+@@ -63,4 +70,4 @@ def filename_from_video_url(video_url: Optional[str]) -> str:
+     return cleaned
+ 
+ 
+-__all__ = ["filename_from_video_url"]
++__all__ = ["filename_from_video_url", "video_url"]
+diff --git a/tests/api/test_ssrf_and_traversal.py b/tests/api/test_ssrf_and_traversal.py
+index 0035bb5..d75cce1 100644
+--- a/tests/api/test_ssrf_and_traversal.py
++++ b/tests/api/test_ssrf_and_traversal.py
+@@ -8,7 +8,7 @@ Covers (all host-runnable, no heavy deps):
+ import pytest
+ 
+ from clippyme.api.schemas import validate_public_url
+-from clippyme.domain.url_utils import filename_from_video_url
++from clippyme.domain.url_utils import filename_from_video_url, video_url
+ from clippyme.integrations.social_publisher import (
+     ZernioError,
+     _reject_internal_upload_url,
+@@ -53,6 +53,13 @@ def test_filename_from_video_url_blocks_traversal(url, expected):
+     assert filename_from_video_url(url) == expected
+ 
+ 
++def test_video_url_quotes_reserved_filename_characters():
++    url = video_url("job-1", "Podcast #014 — São Paulo.mp4")
++
++    assert url == "/videos/job-1/Podcast%20%23014%20%E2%80%94%20S%C3%A3o%20Paulo.mp4"
++    assert filename_from_video_url(url) == "Podcast #014 — São Paulo.mp4"
++
++
+ # --- SSRF: presigned upload URL -------------------------------------------
+ 
+ @pytest.mark.parametrize("bad", [
+-- 
+2.55.0
+
