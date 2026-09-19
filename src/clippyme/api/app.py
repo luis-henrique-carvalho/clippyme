@@ -69,6 +69,8 @@ from clippyme.storage.config_store import (
 from clippyme.domain.job_worker import make_workers
 from clippyme.domain.history_service import scan_history, is_valid_job_id
 from clippyme.api.config_routes import router as config_router
+from clippyme.api.viral_studio_routes import router as viral_studio_router
+
 
 load_dotenv()
 
@@ -241,7 +243,7 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=ALLOWED_ORIGINS,
     allow_credentials=False,
-    allow_methods=["GET", "POST", "DELETE"],
+    allow_methods=["GET", "POST", "PATCH", "DELETE"],
     allow_headers=["Content-Type", "Authorization", "X-Gemini-Key", "X-API-Token"],
 )
 
@@ -279,6 +281,8 @@ app.mount("/fonts", StaticFiles(directory="fonts"), name="fonts")
 # router — they touch none of the job runtime state, so keeping them out of
 # app.py lets this module stay focused on the job lifecycle.
 app.include_router(config_router)
+app.include_router(viral_studio_router, prefix="/api/viral-studio")
+
 
 
 @app.get("/")
