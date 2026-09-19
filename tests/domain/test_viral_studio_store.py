@@ -372,3 +372,36 @@ def test_create_batch_rejects_non_dict_item(tmp_store):
             "items": ["not_a_dict"],
         })
 
+
+def test_batch_status_syncs_with_item_status(tmp_store):
+    """Batch status automatically derives from item statuses and updates on item change."""
+    batch = viral_studio_store.create_batch({
+        "brand_id": "vale-o-clique",
+        "items": [
+            {"source_url": "https://www.instagram.com/reel/1/"},
+            {"source_url": "https://www.instagram.com/reel/2/"},
+        ],
+    })
+    batch_id = batch["id"]
+    item1_id = batch["items"][0]["id"]
+    item2_id = batch["items"][1]["id"]
+
+    # Initial state is PENDING
+    assert viral_studio_store.get_batch(batch_id)["status"] == "PENDING"
+    assert viral_studio_store.list_batches()[0]["status"] == "PENDING"
+
+    # One item completes -> still PENDING since item2 is PENDING
+    viral_studio_store.update_item(item1_id, {"status": "READY_FOR_REVIEW"})
+    assert viral_studio_store.get_batch(batch_id)["status"] == "PENDING"
+
+    # Both items ready -> READY_FOR_REVIEW
+    viral_studio_store.update_item(item2_id, {"status": "READY_FOR_REVIEW"})
+    assert viral_studio_store.get_batch(batch_id)["status"] == "READY_FOR_REVIEW"
+    assert viral_studio_store.list_batches()[0]["status"] == "READY_FOR_REVIEW"
+
+    # All items failed -> FAILED
+    viral_studio_store.update_item(item1_id, {"status": "FAILED"})
+    viral_studio_store.update_item(item2_id, {"status": "FAILED"})
+    assert viral_studio_store.get_batch(batch_id)["status"] == "FAILED"
+
+

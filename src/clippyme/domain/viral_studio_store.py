@@ -525,6 +525,20 @@ def delete_template(template_id: str) -> bool:
 # Batch and Item Storage Operations
 # ---------------------------------------------------------------------------
 
+def _derive_batch_status(items: List[Dict[str, Any]]) -> str:
+    """Derive batch-level lifecycle status from constituent item statuses."""
+    if not items:
+        return "PENDING"
+    statuses = [item.get("status") for item in items if isinstance(item, dict)]
+    if not statuses:
+        return "PENDING"
+    if all(s == "FAILED" for s in statuses):
+        return "FAILED"
+    if any(s in ("PENDING", "DOWNLOADING", "ANALYZING", "RENDERING") for s in statuses):
+        return "PENDING"
+    return "READY_FOR_REVIEW"
+
+
 def _load_batches_locked() -> Dict[str, Dict[str, Any]]:
     path = get_batches_path()
     return _read_json_file(path)
@@ -533,7 +547,13 @@ def _load_batches_locked() -> Dict[str, Dict[str, Any]]:
 def list_batches() -> List[Dict[str, Any]]:
     with _STORE_LOCK:
         batches = _load_batches_locked()
-        return sorted(batches.values(), key=lambda b: b.get("created_at", ""), reverse=True)
+        res = []
+        for b in batches.values():
+            batch_dict = dict(b)
+            items = batch_dict.get("items", [])
+            batch_dict["status"] = _derive_batch_status(items)
+            res.append(batch_dict)
+        return sorted(res, key=lambda b: b.get("created_at", ""), reverse=True)
 
 
 def get_batch(batch_id: str) -> Optional[Dict[str, Any]]:
@@ -542,7 +562,11 @@ def get_batch(batch_id: str) -> Optional[Dict[str, Any]]:
     with _STORE_LOCK:
         batches = _load_batches_locked()
         batch = batches.get(batch_id)
-        return dict(batch) if batch else None
+        if not batch:
+            return None
+        res = dict(batch)
+        res["status"] = _derive_batch_status(res.get("items", []))
+        return res
 
 
 def get_batch_or_raise(batch_id: str) -> Dict[str, Any]:
@@ -732,6 +756,7 @@ def update_item(item_id: str, updates: Union[Dict[str, Any], Any]) -> Dict[str, 
                             item[k] = v
                     item["updated_at"] = _utcnow_iso()
                     batch["items"][idx] = item
+                    batch["status"] = _derive_batch_status(batch.get("items", []))
                     batch["updated_at"] = _utcnow_iso()
                     found_item = dict(item)
                     found_item["batch_id"] = batch.get("batch_id") or batch.get("id")
