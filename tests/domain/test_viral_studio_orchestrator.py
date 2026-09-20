@@ -361,3 +361,79 @@ async def test_publish_is_idempotent_and_persists_result(tmp_store_and_output, m
     assert first == second
     record = viral_studio_store.get_item(item_id)["publication_records"][0]
     assert record["result"]["post_id"] == "post-1"
+
+
+@pytest.mark.asyncio
+async def test_process_viral_item_persists_logs_and_context(tmp_store_and_output, dummy_video_file, monkeypatch):
+    """process_viral_item records chronological structured logs and ai_context_summary on the item."""
+    from clippyme.domain.viral_studio_context import VideoContext
+
+    batch = viral_studio_store.create_batch({
+        "brand_id": "vale-o-clique",
+        "items": [
+            {
+                "source_url": "https://www.instagram.com/reel/C_LOGS_TEST/",
+                "product_code": "LOG-01",
+            }
+        ],
+    })
+    item_id = batch["items"][0]["id"]
+
+    def fake_dl(url, out_path, timeout=120):
+        os.makedirs(os.path.dirname(out_path), exist_ok=True)
+        with open(out_path, "wb") as f:
+            f.write(b"video data")
+        return out_path
+
+    fake_ctx = VideoContext(
+        keyframes=[b"f1", b"f2"],
+        transcript="Testando logs e observabilidade",
+        original_caption="Post original #achadinho",
+        title="Título Teste",
+        scenes_count=2,
+        has_audio=True,
+        duration=15.0,
+    )
+
+    async def fake_copy(brand, item, video_path=None, video_context=None):
+        return AICopyData(
+            product="Produto Log",
+            product_description="Desc",
+            headlines=["H1", "H2", "H3", "H4", "H5"],
+            selected_headline="H1",
+            caption="Caption",
+            hashtags=["#log"],
+        )
+
+    def fake_render(source_path, brand, template, headline, output_path, watermark=True):
+        os.makedirs(os.path.dirname(output_path), exist_ok=True)
+        with open(output_path, "wb") as f:
+            f.write(b"rendered")
+        return output_path
+
+    monkeypatch.setattr("clippyme.domain.viral_studio_download.download_viral_video", fake_dl)
+    monkeypatch.setattr("clippyme.domain.viral_studio_context.extract_viral_context", lambda *a, **k: fake_ctx)
+    monkeypatch.setattr("clippyme.domain.viral_studio_copy.generate_affiliate_copy", fake_copy)
+    monkeypatch.setattr("clippyme.domain.viral_studio_renderer.render_viral_video", fake_render)
+
+    res = await viral_studio_orchestrator.process_viral_item(item_id)
+    assert res["status"] == "READY_FOR_REVIEW"
+
+    item_in_store = viral_studio_store.get_item(item_id)
+    assert item_in_store.get("ai_context_summary") is not None
+    assert item_in_store["ai_context_summary"]["scenes_count"] == 2
+    assert item_in_store["ai_context_summary"]["keyframes_count"] == 2
+    assert item_in_store["ai_context_summary"]["has_audio"] is True
+
+    logs = item_in_store.get("logs") or []
+    assert len(logs) >= 5
+    stages = [l["stage"] for l in logs]
+    assert "INIT" in stages
+    assert "DOWNLOAD" in stages
+    assert "CONTEXT" in stages
+    assert "AI_COPY" in stages
+    assert "RENDER" in stages
+    assert "COMPLETE" in stages
+    # Check timestamp format
+    assert all("timestamp" in l and "message" in l for l in logs)
+

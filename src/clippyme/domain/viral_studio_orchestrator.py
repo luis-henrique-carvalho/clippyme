@@ -31,6 +31,7 @@ from clippyme.api.viral_studio_schemas import (
     VisualTemplate,
 )
 from clippyme.domain import (
+    viral_studio_context,
     viral_studio_copy,
     viral_studio_download,
     viral_studio_renderer,
@@ -40,6 +41,34 @@ from clippyme.domain.errors import ConflictError, NotFoundError, ValidationError
 from clippyme.domain.job_submission import submit_job
 
 logger = logging.getLogger("clippyme.viral_studio_orchestrator")
+
+
+def append_item_log(
+    item_id: str,
+    stage: str,
+    message: str,
+    level: str = "info",
+    details: Optional[Dict[str, Any]] = None,
+) -> List[Dict[str, Any]]:
+    """Append a structured log entry to the item's activity history and persist."""
+    log_entry: Dict[str, Any] = {
+        "timestamp": datetime.now(dt_timezone.utc).isoformat(),
+        "stage": stage,
+        "level": level,
+        "message": message,
+    }
+    if details:
+        log_entry["details"] = details
+    try:
+        item = viral_studio_store.get_item(item_id)
+        if item:
+            logs = list(item.get("logs") or [])
+            logs.append(log_entry)
+            viral_studio_store.update_item(item_id, {"logs": logs})
+            return logs
+    except Exception as exc:
+        logger.debug("Could not persist log for item %s: %s", item_id, exc)
+    return [log_entry]
 
 def _get_output_dir() -> str:
     return os.environ.get("CLIPPYME_OUTPUT_DIR") or "output"
@@ -118,7 +147,7 @@ async def enqueue_batch(
 
 
 async def process_viral_item(item_id: str) -> Dict[str, Any]:
-    """Execute the full 3-stage pipeline (Download -> Copy -> Render) for a single item.
+    """Execute the full 3-stage pipeline (Download -> Context/Copy -> Render) for a single item.
 
     Strict failure isolation: Any exception is caught and recorded as status FAILED
     with error_message on the item, without raising to the caller.
@@ -143,8 +172,15 @@ async def process_viral_item(item_id: str) -> Dict[str, Any]:
             )
             template_dict = viral_studio_store.get_template_or_raise(template_id)
 
+            append_item_log(
+                item_id,
+                "INIT",
+                f"Iniciando processamento do item",
+                details={"source_url": item.get("source_url"), "brand_id": brand_id, "template_id": template_id},
+            )
+
             # ------------------------------------------------------------------
-            # Stage 1: Downloader (Source Preservation)
+            # Stage 1: Downloader (Source Preservation & Metadata Capture)
             # ------------------------------------------------------------------
             viral_studio_store.update_item(item_id, {"status": "DOWNLOADING", "error_message": None})
             source_path = item.get("source_path")
@@ -161,25 +197,80 @@ async def process_viral_item(item_id: str) -> Dict[str, Any]:
                 )
                 viral_studio_store.update_item(item_id, {"source_path": source_path})
 
+            manifest = viral_studio_download.get_source_manifest(source_path)
+            meta = manifest.get("metadata") or item.get("source_metadata") or {}
+            if meta and not item.get("source_metadata"):
+                viral_studio_store.update_item(item_id, {"source_metadata": meta})
+
+            file_size_kb = round(os.path.getsize(source_path) / 1024, 1) if os.path.isfile(source_path) else 0
+            res_str = ""
+            try:
+                from clippyme.pipeline.scene_detection import get_video_resolution
+                w, h = get_video_resolution(source_path)
+                if w and h:
+                    res_str = f"{w}x{h}"
+            except Exception:
+                pass
+
+            res_info = f", {res_str}" if res_str else ""
+            append_item_log(
+                item_id,
+                "DOWNLOAD",
+                f"Download concluído ({file_size_kb} KB{res_info})",
+                details={
+                    "source_path": source_path,
+                    "resolution": res_str or "unknown",
+                    "title": meta.get("title", ""),
+                    "has_caption": bool(meta.get("description") or meta.get("caption")),
+                    "uploader": meta.get("uploader", ""),
+                },
+            )
+
             # Refresh item state
             item = viral_studio_store.get_item_or_raise(item_id)
 
             # ------------------------------------------------------------------
-            # Stage 2: AI Commercial Analysis & Copy Generation
+            # Stage 2: Multi-Signal Context Extraction & AI Commercial Copy
             # ------------------------------------------------------------------
             viral_studio_store.update_item(item_id, {"status": "ANALYZING"})
             brand_obj = Brand.model_validate(brand_dict)
             item_obj = ViralItem.model_validate(item)
 
+            # Extract multi-signal context
+            video_context = viral_studio_context.extract_viral_context(
+                video_path=source_path,
+                source_metadata=item.get("source_metadata") or meta,
+            )
+            context_summary = video_context.to_summary_dict()
+            viral_studio_store.update_item(item_id, {"ai_context_summary": context_summary})
+
+            append_item_log(
+                item_id,
+                "CONTEXT",
+                f"Contexto extraído: {video_context.scenes_count} cenas detectadas ({len(video_context.keyframes)} frames), áudio {'com fala identificada' if video_context.has_audio else 'sem fala/música'}",
+                details=context_summary,
+            )
+
             # A job retry must reuse successful analysis instead of spending
             # another AI request after a later render failure.
             copy_data = item.get("ai_copy")
             if not copy_data:
-                copy_data = await viral_studio_copy.generate_affiliate_copy(
-                    brand=brand_obj,
-                    item=item_obj,
-                    video_path=source_path,
-                )
+                try:
+                    copy_data = await viral_studio_copy.generate_affiliate_copy(
+                        brand=brand_obj,
+                        item=item_obj,
+                        video_path=source_path,
+                        video_context=video_context,
+                    )
+                except TypeError as t_err:
+                    if "video_context" in str(t_err):
+                        copy_data = await viral_studio_copy.generate_affiliate_copy(
+                            brand=brand_obj,
+                            item=item_obj,
+                            video_path=source_path,
+                        )
+                    else:
+                        raise
 
             copy_headline = (
                 copy_data.get("selected_headline")
@@ -190,6 +281,11 @@ async def process_viral_item(item_id: str) -> Dict[str, Any]:
                 copy_data.get("caption")
                 if isinstance(copy_data, dict)
                 else getattr(copy_data, "caption", None)
+            )
+            copy_product = (
+                copy_data.get("product")
+                if isinstance(copy_data, dict)
+                else getattr(copy_data, "product", "Produto")
             )
 
             selected_headline = (
@@ -210,6 +306,17 @@ async def process_viral_item(item_id: str) -> Dict[str, Any]:
                     "selected_headline": selected_headline,
                     "caption": caption,
                     "ai_copy": copy_data.model_dump() if hasattr(copy_data, "model_dump") else copy_data,
+                    "ai_context_summary": context_summary,
+                },
+            )
+
+            append_item_log(
+                item_id,
+                "AI_COPY",
+                f"Copy comercial gerada com sucesso para '{copy_product}'",
+                details={
+                    "selected_headline": selected_headline,
+                    "headlines_count": len(copy_data.get("headlines") if isinstance(copy_data, dict) else copy_data.headlines),
                 },
             )
 
@@ -220,6 +327,17 @@ async def process_viral_item(item_id: str) -> Dict[str, Any]:
             target_render_path = _resolve_render_path(batch_id, item_id)
             template_obj = VisualTemplate.model_validate(template_dict)
 
+            append_item_log(
+                item_id,
+                "RENDER",
+                f"Renderizando vídeo 9:16 via FFmpeg com template '{template_obj.name}'",
+                details={
+                    "template_id": template_id,
+                    "headline": selected_headline,
+                    "resolution": f"{template_obj.width}x{template_obj.height}",
+                },
+            )
+
             rendered_path = await asyncio.to_thread(
                 viral_studio_renderer.render_viral_video,
                 source_path=source_path,
@@ -228,6 +346,13 @@ async def process_viral_item(item_id: str) -> Dict[str, Any]:
                 headline=selected_headline,
                 output_path=target_render_path,
                 watermark=template_obj.watermark_enabled,
+            )
+
+            append_item_log(
+                item_id,
+                "COMPLETE",
+                f"Vídeo renderizado com sucesso e pronto para revisão",
+                details={"rendered_path": rendered_path},
             )
 
             # Final success state: READY_FOR_REVIEW
@@ -244,6 +369,13 @@ async def process_viral_item(item_id: str) -> Dict[str, Any]:
 
         except Exception as exc:
             logger.error("Failed processing viral item %s: %s", item_id, exc)
+            append_item_log(
+                item_id,
+                "ERROR",
+                f"Falha no processamento: {str(exc)}",
+                level="error",
+                details={"error": str(exc)},
+            )
             updated_item = viral_studio_store.update_item(
                 item_id,
                 {
@@ -296,6 +428,7 @@ async def rerender_item(
         # Keep the original domain error for the HTTP response, but never
         # strand a user-facing item in RENDERING after a failed subprocess.
         if viral_studio_store.get_item(item_id):
+            append_item_log(item_id, "ERROR", f"Falha ao re-renderizar: {exc}", level="error")
             viral_studio_store.update_item(
                 item_id, {"status": "FAILED", "error_message": str(exc)}
             )
@@ -336,6 +469,13 @@ async def _rerender_item(
     render_headline = headline or item.get("selected_headline") or item.get("manual_headline") or "Achadinho"
     render_watermark = watermark if watermark is not None else template_obj.watermark_enabled
 
+    append_item_log(
+        item_id,
+        "RERENDER",
+        f"Iniciando re-renderização com headline: '{render_headline}'",
+        details={"template_id": tpl_id, "watermark": render_watermark},
+    )
+
     viral_studio_store.update_item(
         item_id,
         {
@@ -354,6 +494,13 @@ async def _rerender_item(
         headline=render_headline,
         output_path=target_render_path,
         watermark=render_watermark,
+    )
+
+    append_item_log(
+        item_id,
+        "RERENDER_COMPLETE",
+        f"Re-renderização concluída com sucesso",
+        details={"rendered_path": rendered_path},
     )
 
     updated = viral_studio_store.update_item(
@@ -385,6 +532,7 @@ def approve_item(item_id: str) -> Dict[str, Any]:
     if not rendered_path or not os.path.isfile(rendered_path) or os.path.getsize(rendered_path) == 0:
         raise ValidationError(f"Item {item_id} has not been rendered and cannot be approved")
 
+    append_item_log(item_id, "APPROVE", "Item aprovado para publicação")
     return viral_studio_store.update_item(item_id, {"status": "APPROVED", "error_message": None})
 
 
@@ -461,12 +609,25 @@ async def publish_viral_items(
                 item_id, key, {"key": key, "status": state, "result": result},
                 status="SCHEDULED" if state == "scheduled" else "PUBLISHED",
             )
+            append_item_log(
+                item_id,
+                "PUBLISHED" if state == "published" else "SCHEDULED",
+                f"Item {'publicado' if state == 'published' else 'agendado'} com sucesso na rede social",
+                details=result,
+            )
             results.append(result)
         except Exception as exc:
             viral_studio_store.finish_publication(
                 item_id, key, {"key": key, "status": "failed", "error": str(exc)}
             )
             viral_studio_store.update_item(item_id, {"error_message": str(exc)})
+            append_item_log(
+                item_id,
+                "PUBLISH_ERROR",
+                f"Falha na publicação: {str(exc)}",
+                level="error",
+                details={"error": str(exc)},
+            )
             results.append({"item_id": item_id, "status": "failed", "error": str(exc)})
 
     return {

@@ -5,6 +5,7 @@ import logoMark from './logo-mark.png';
 
 const TABS = [
   { id: 'create', label: 'Create', icon: 'wand-sparkles' },
+  { id: 'viral', label: 'Viral Studio', icon: 'flame' },
   { id: 'live', label: 'Live Monitor', icon: 'rss' },
   { id: 'history', label: 'History', icon: 'clock' },
   { id: 'settings', label: 'Settings', icon: 'settings' },

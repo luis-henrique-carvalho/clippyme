@@ -15,7 +15,7 @@ import re
 from collections.abc import Mapping
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Optional
 from urllib.parse import urlparse
 import uuid
 
@@ -131,13 +131,20 @@ def _assert_public_resolution(url: str) -> None:
             raise ValidationError("Source URL points to a non-public address")
 
 
-def _write_manifest(output_path: Path, source: str, *, source_kind: str = "remote") -> None:
+def _write_manifest(
+    output_path: Path,
+    source: str,
+    *,
+    source_kind: str = "remote",
+    metadata: Optional[dict[str, Any]] = None,
+) -> None:
     """Persist provenance next to the preserved source without exposing secrets."""
     manifest = {
         "source": source,
         "source_kind": source_kind,
         "downloaded_at": datetime.now(timezone.utc).isoformat(),
         "reusable_for_rerender": True,
+        "metadata": metadata or {},
     }
     manifest_path = output_path.with_name(SOURCE_MANIFEST_FILENAME)
     fd, temp_path = tempfile.mkstemp(prefix=".source_manifest-", suffix=".tmp", dir=output_path.parent)
@@ -150,6 +157,18 @@ def _write_manifest(output_path: Path, source: str, *, source_kind: str = "remot
     finally:
         if os.path.exists(temp_path):
             os.unlink(temp_path)
+
+
+def get_source_manifest(source_path: str | Path) -> dict[str, Any]:
+    """Read the manifest JSON next to the source file if it exists."""
+    manifest_path = Path(source_path).with_name(SOURCE_MANIFEST_FILENAME)
+    if manifest_path.is_file():
+        try:
+            with open(manifest_path, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            pass
+    return {}
 
 
 def _find_downloaded_file(directory: Path, prefix: str) -> Path | None:
@@ -200,13 +219,29 @@ def download_viral_video(url: str, output_path: str, timeout: int = 120) -> str:
         "cachedir": False,
     }
     try:
+        extracted_info = None
         with yt_dlp.YoutubeDL(options) as downloader:
-            downloader.download([source_url])
+            if hasattr(downloader, "extract_info"):
+                try:
+                    extracted_info = downloader.extract_info(source_url, download=True)
+                except Exception:
+                    downloader.download([source_url])
+            else:
+                downloader.download([source_url])
         downloaded = _find_downloaded_file(destination.parent, prefix)
         if downloaded is None or downloaded.stat().st_size == 0:
             raise DownloadError("yt-dlp completed without producing a video file")
         os.replace(downloaded, destination)
-        _write_manifest(destination, source_url)
+
+        meta_dict = {}
+        if isinstance(extracted_info, dict):
+            meta_dict = {
+                "title": extracted_info.get("title") or "",
+                "description": extracted_info.get("description") or "",
+                "tags": extracted_info.get("tags") or [],
+                "uploader": extracted_info.get("uploader") or "",
+            }
+        _write_manifest(destination, source_url, metadata=meta_dict)
         return str(destination)
     except (ValidationError, DownloadError):
         raise
@@ -303,6 +338,9 @@ def download_batch_item(
         destination = resolve_source_path(batch_id, str(item_id), base_dir)
         saved_path = download_viral_video(source_url, destination, timeout=timeout)
         updated["source_path"] = saved_path
+        manifest = get_source_manifest(saved_path)
+        if manifest.get("metadata"):
+            updated["source_metadata"] = manifest["metadata"]
         updated["status"] = "READY_FOR_REVIEW"
         updated["error_message"] = None
     except Exception as exc:

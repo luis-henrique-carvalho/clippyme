@@ -502,3 +502,28 @@ select.sel:focus{outline:0;border-color:var(--brand-blue)}
 .fatal-shell{min-height:100vh;display:grid;place-items:center;padding:24px}.fatal-card{width:min(680px,100%);background:var(--bg-2);border:1px solid var(--line-2);border-radius:var(--r-lg);padding:32px;box-shadow:var(--shadow-lg)}.fatal-card h1{font-size:clamp(28px,5vw,44px);margin:12px 0}.fatal-card p{color:var(--fg-3);line-height:1.6}.fatal-icon{width:48px;height:48px;border-radius:14px;display:grid;place-items:center;background:var(--danger-bg);color:var(--danger)}.fatal-icon svg{width:24px;height:24px}.fatal-actions{display:flex;gap:10px;flex-wrap:wrap;margin:24px 0}.fatal-card details{border-top:1px solid var(--line-1);padding-top:16px;color:var(--fg-3)}.fatal-card pre{white-space:pre-wrap;margin-top:10px;font:12px/1.5 var(--font-mono)}
 @media (max-width:760px){.topnav{padding:0 10px;gap:8px}.brand>span,.status-dot .sd-lbl,.avatar{display:none}.tabs{overflow-x:auto;scrollbar-width:none}.tab{padding:7px 11px}.processing-toolbar{align-items:flex-start;flex-direction:column}.processing-actions{margin-left:0;width:100%;justify-content:flex-start}.operation-metric{min-width:calc(50% - 4px)}}
 @media (prefers-reduced-motion:reduce){*,*::before,*::after{scroll-behavior:auto!important;animation-duration:.01ms!important;animation-iteration-count:1!important;transition-duration:.01ms!important}.confetti{display:none!important}.fade-in{animation:none!important}}
+
+/* ============================================================ VIRAL STUDIO DASHBOARD */
+.viral-stats-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:14px;margin-bottom:24px}
+.viral-stat-card{background:var(--bg-2);border:1px solid var(--line-1);border-radius:var(--r-md);padding:16px 18px;display:flex;align-items:center;gap:14px;box-shadow:var(--shadow-sm);transition:border-color .15s,transform .12s}
+.viral-stat-card:hover{border-color:var(--line-2);transform:translateY(-1px)}
+.viral-stat-icon{width:42px;height:42px;border-radius:var(--r-sm);background:var(--bg-3);border:1px solid var(--line-2);display:flex;align-items:center;justify-content:center;flex:none}
+.viral-stat-icon svg{width:18px;height:18px}
+.viral-stat-val{font-size:var(--text-24);font-weight:700;font-family:var(--font-display);color:var(--fg-1);line-height:1}
+.viral-stat-lbl{font-size:var(--text-xs);color:var(--fg-3);margin-top:4px;font-weight:500}
+.viral-batch-row{display:flex;align-items:center;gap:16px;padding:16px 20px;border-bottom:1px solid var(--line-1);transition:background .12s;cursor:pointer}
+.viral-batch-row:last-child{border-bottom:0}
+.viral-batch-row:hover{background:var(--bg-3)}
+.viral-batch-thumb{width:46px;height:46px;border-radius:var(--r-sm);background:var(--bg-3);border:1px solid var(--line-2);display:flex;align-items:center;justify-content:center;font-weight:700;font-size:var(--text-sm);color:var(--fg-1);flex:none;text-transform:uppercase}
+.viral-batch-info{flex:1;min-width:0}
+.viral-batch-title{display:flex;align-items:center;gap:8px;font-size:var(--text-sm);font-weight:600;color:var(--fg-1)}
+.viral-batch-meta{font-family:var(--font-mono);font-size:var(--text-2xs);color:var(--fg-3);margin-top:4px;display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.viral-batch-actions{display:flex;align-items:center;gap:12px;flex:none;margin-left:auto}
+@media (max-width:920px){
+  .viral-stats-grid{grid-template-columns:repeat(2,1fr)}
+}
+@media (max-width:680px){
+  .viral-stats-grid{grid-template-columns:1fr}
+  .viral-batch-row{flex-direction:column;align-items:flex-start;gap:12px}
+  .viral-batch-actions{width:100%;justify-content:space-between;margin-left:0;border-top:1px solid var(--line-1);padding-top:10px}
+}

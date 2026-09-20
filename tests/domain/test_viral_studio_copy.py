@@ -750,4 +750,86 @@ def test_generate_affiliate_copy_clamps_headlines_to_ten_when_item_has_full_list
     assert res.headlines[0] == "Nova Headline Manual Extrema"
 
 
+def test_build_affiliate_copy_prompt_with_video_context(sample_brand):
+    """Prompt cleanly incorporates transcript, caption, title, and keyframe references."""
+    from clippyme.domain.viral_studio_context import VideoContext
+
+    ctx = VideoContext(
+        keyframes=[b"f1", b"f2", b"f3"],
+        transcript="Este mini selador esquenta em 3 segundos",
+        original_caption="Olha que prático esse achadinho! #cozinha",
+        title="Mini Selador Portátil",
+        tags=["#cozinha", "#dicas"],
+        scenes_count=3,
+        has_audio=True,
+    )
+
+    prompt = viral_studio_copy.build_affiliate_copy_prompt(
+        brand=sample_brand,
+        product_code="SEL-10",
+        video_context=ctx,
+    )
+
+    assert "--- CONTEXTO EXTRAÍDO DO VÍDEO ---" in prompt
+    assert "Este mini selador esquenta em 3 segundos" in prompt
+    assert "Olha que prático esse achadinho!" in prompt
+    assert "Mini Selador Portátil" in prompt
+    assert "#cozinha, #dicas" in prompt
+    assert "3 frames visuais" in prompt
+
+
+def test_generate_affiliate_copy_multimodal_frames_and_context_summary(sample_brand, sample_item):
+    """generate_affiliate_copy extracts context, passes multimodal payload, and saves ai_context_summary."""
+    from clippyme.domain.viral_studio_context import VideoContext
+
+    ctx = VideoContext(
+        keyframes=[b"jpeg_frame_bytes_1", b"jpeg_frame_bytes_2"],
+        transcript="Mini aspirador sem fio potente",
+        original_caption="Melhor aspirador! #limpeza",
+        title="Mini Aspirador",
+        tags=["#limpeza"],
+        scenes_count=2,
+        has_audio=True,
+        duration=10.0,
+    )
+
+    mock_resp = MagicMock()
+    mock_resp.text = """{
+      "product": "Mini Aspirador Sem Fio",
+      "product_description": "Aspirador potente e compacto",
+      "headlines": ["Limpe seu carro em minutos! 😱", "H2", "H3", "H4", "H5"],
+      "selected_headline": "Limpe seu carro em minutos! 😱",
+      "caption": "Limpe tudo com facilidade!\\n📌 Produto PROD-99\\nConfira na bio!\\n#achadinhos #limpeza",
+      "hashtags": ["#achadinhos", "#limpeza"]
+    }"""
+
+    mock_models = AsyncMock()
+    mock_models.generate_content.return_value = mock_resp
+    mock_client = MagicMock()
+    mock_client.aio.models = mock_models
+
+    with patch("google.genai.Client", return_value=mock_client), \
+         patch("clippyme.domain.viral_studio_store.update_item"):
+
+        copy_res = asyncio.run(viral_studio_copy.generate_affiliate_copy(
+            brand=sample_brand,
+            item=sample_item,
+            api_key="test-key",
+            video_context=ctx,
+        ))
+
+        assert copy_res.product == "Mini Aspirador Sem Fio"
+        assert sample_item.ai_context_summary is not None
+        assert sample_item.ai_context_summary["scenes_count"] == 2
+        assert sample_item.ai_context_summary["keyframes_count"] == 2
+        assert sample_item.ai_context_summary["has_audio"] is True
+        assert mock_models.generate_content.called
+        call_kwargs = mock_models.generate_content.call_args[1]
+        assert "contents" in call_kwargs
+        # Multimodal payload is a list with frames and prompt
+        assert isinstance(call_kwargs["contents"], list)
+        assert len(call_kwargs["contents"]) >= 2
+
+
+
 

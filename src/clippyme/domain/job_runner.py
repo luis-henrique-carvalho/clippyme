@@ -62,6 +62,28 @@ def _bounded_max_attempts(job_data: dict, env: dict) -> int:
     return min(10, max(1, value))
 
 
+def _sync_viral_studio_failure(job_data: dict, error_msg: str) -> None:
+    """Sync unexpected subprocess failures directly into viral studio store state and logs."""
+    if not isinstance(job_data, dict) or job_data.get("job_type") != "viral_studio":
+        return
+    cmd = job_data.get("cmd", [])
+    item_id = None
+    if isinstance(cmd, list) and "--item-id" in cmd:
+        idx = cmd.index("--item-id")
+        if idx + 1 < len(cmd):
+            item_id = cmd[idx + 1]
+    if item_id:
+        try:
+            from clippyme.domain import viral_studio_orchestrator, viral_studio_store
+
+            item = viral_studio_store.get_item(item_id)
+            if item and item.get("status") not in ("READY_FOR_REVIEW", "APPROVED", "PUBLISHED"):
+                viral_studio_store.update_item(item_id, {"status": "FAILED", "error_message": error_msg})
+                viral_studio_orchestrator.append_item_log(item_id, "ERROR", error_msg, level="error")
+        except Exception:
+            logger.warning("Failed to sync viral studio failure state for item %s", item_id, exc_info=True)
+
+
 def make_run_job(*, jobs: dict, output_root: str, on_change=None):
     """Build the ``run_job`` coroutine bound to shared application state."""
 
@@ -254,7 +276,9 @@ def make_run_job(*, jobs: dict, output_root: str, on_change=None):
                         jobs[job_id]["result"] = final
                     else:
                         jobs[job_id]["status"] = "failed"
-                        jobs[job_id]["logs"].append("No metadata file generated.")
+                        err_msg = "No metadata file generated."
+                        jobs[job_id]["logs"].append(err_msg)
+                        _sync_viral_studio_failure(jobs[job_id], err_msg)
                     break
 
                 # Exit 2 is deterministic validation/preflight rejection.
@@ -277,9 +301,9 @@ def make_run_job(*, jobs: dict, output_root: str, on_change=None):
                     if returncode == 2
                     else "retry limit reached"
                 )
-                jobs[job_id]["logs"].append(
-                    f"Process failed with exit code {returncode} ({reason})."
-                )
+                err_msg = f"Process failed with exit code {returncode} ({reason})."
+                jobs[job_id]["logs"].append(err_msg)
+                _sync_viral_studio_failure(jobs[job_id], err_msg)
                 break
 
         except asyncio.CancelledError:
@@ -287,13 +311,17 @@ def make_run_job(*, jobs: dict, output_root: str, on_change=None):
             job = jobs.get(job_id)
             if job and job.get("status") not in job_control.TERMINAL_STATES:
                 job["status"] = "failed"
-                job["logs"].append("Job interrupted by server shutdown.")
+                err_msg = "Job interrupted by server shutdown."
+                job["logs"].append(err_msg)
+                _sync_viral_studio_failure(job, err_msg)
             raise
         except Exception as exc:
             job = jobs.get(job_id)
             if job is not None:
                 job["status"] = "failed"
-                job["logs"].append(f"Execution error: {exc}")
+                err_msg = f"Execution error: {exc}"
+                job["logs"].append(err_msg)
+                _sync_viral_studio_failure(job, err_msg)
             logger.exception("run_job failed for job_id=%s", job_id)
             await _stop_process_tree(job_id, process or (job or {}).get("process"))
         finally:

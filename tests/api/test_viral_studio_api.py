@@ -10,9 +10,13 @@ ORIGIN = {"Origin": "http://localhost:5175"}
 
 @pytest.fixture
 def api_client(tmp_path, monkeypatch):
-    """TestClient with temporary directory for viral studio store."""
+    """TestClient with temporary directory for viral studio store and outputs."""
     data_dir = tmp_path / "viral_studio"
     data_dir.mkdir(parents=True, exist_ok=True)
+    out_dir = tmp_path / "output"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setenv("CLIPPYME_OUTPUT_DIR", str(out_dir))
+    monkeypatch.setattr(app_module, "OUTPUT_DIR", str(out_dir))
     monkeypatch.setattr(store_module, "DATA_DIR", str(data_dir))
     monkeypatch.setattr(store_module, "BRANDS_FILE", None)
     monkeypatch.setattr(store_module, "TEMPLATES_FILE", None)
@@ -811,4 +815,49 @@ def test_publish_items_endpoint(api_client, monkeypatch, tmp_path):
     assert data["failed"] == 0
     assert data["results"][0]["status"] == "published"
     assert data["results"][0]["post_id"] == "post_12345"
+
+
+def test_get_batch_and_item_includes_context_and_logs(api_client):
+    """GET /batches/{id} and GET /items/{id} serialize logs, source_metadata, and ai_context_summary."""
+    brand = api_client.post(
+        "/api/viral-studio/brands",
+        json={"id": "logs-brand", "name": "Logs Brand", "handle": "@logsbrand"},
+    ).json()
+
+    batch_resp = api_client.post(
+        "/api/viral-studio/batches",
+        json={
+            "brand_id": "logs-brand",
+            "items": [{"source_url": "https://www.instagram.com/reel/C_LOGS_API/"}],
+        },
+    )
+    assert batch_resp.status_code == 201
+    batch = batch_resp.json()
+    item_id = batch["items"][0]["id"]
+
+    # Update item with source_metadata, ai_context_summary, and logs
+    store_module.update_item(
+        item_id,
+        {
+            "source_metadata": {"title": "Post Title", "description": "Original caption"},
+            "ai_context_summary": {"scenes_count": 3, "keyframes_count": 3, "has_audio": True},
+            "logs": [{"stage": "INIT", "message": "Initialized", "timestamp": "2026-09-20T18:00:00Z"}],
+        },
+    )
+
+    item_resp = api_client.get(f"/api/viral-studio/items/{item_id}")
+    assert item_resp.status_code == 200
+    item_data = item_resp.json()
+    assert item_data["source_metadata"]["title"] == "Post Title"
+    assert item_data["ai_context_summary"]["scenes_count"] == 3
+    assert len(item_data["logs"]) == 1
+    assert item_data["logs"][0]["stage"] == "INIT"
+
+    # Also verify batch endpoint returns it in the item list
+    batch_get = api_client.get(f"/api/viral-studio/batches/{batch['id']}")
+    assert batch_get.status_code == 200
+    item_in_batch = batch_get.json()["items"][0]
+    assert item_in_batch["ai_context_summary"]["scenes_count"] == 3
+    assert len(item_in_batch["logs"]) == 1
+
 

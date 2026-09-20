@@ -67,6 +67,7 @@ def build_affiliate_copy_prompt(
     product_code: Optional[str] = None,
     product_url: Optional[str] = None,
     manual_instructions: Optional[str] = None,
+    video_context: Optional[Union[Any, Dict[str, Any]]] = None,
 ) -> str:
     """Build the prompt for Gemini affiliate copy generation. Pure function.
 
@@ -103,6 +104,36 @@ def build_affiliate_copy_prompt(
     if instructions_str:
         user_instructions = f"- Instruções adicionais do usuário: \"{instructions_str}\"\n"
 
+    context_lines = []
+    if video_context is not None:
+        vc_original_caption = _extract_field(video_context, "original_caption", "")
+        vc_transcript = _extract_field(video_context, "transcript", "")
+        vc_title = _extract_field(video_context, "title", "")
+        vc_tags = _extract_field(video_context, "tags", [])
+        vc_keyframes = _extract_field(video_context, "keyframes", [])
+        vc_scenes = _extract_field(video_context, "scenes_count", 0)
+
+        if vc_original_caption and str(vc_original_caption).strip():
+            context_lines.append(f"- Legenda / descrição original do post: \"{str(vc_original_caption).strip()}\"")
+        if vc_transcript and str(vc_transcript).strip():
+            context_lines.append(f"- Transcrição do áudio falado no vídeo: \"{str(vc_transcript).strip()}\"")
+        if vc_title and str(vc_title).strip():
+            context_lines.append(f"- Título do post original: \"{str(vc_title).strip()}\"")
+        if vc_tags and isinstance(vc_tags, list) and len(vc_tags) > 0:
+            clean_tags = [str(t) for t in vc_tags if str(t).strip()]
+            if clean_tags:
+                context_lines.append(f"- Tags / tópicos originais: {', '.join(clean_tags)}")
+        if vc_keyframes and isinstance(vc_keyframes, list) and len(vc_keyframes) > 0:
+            context_lines.append(
+                f"- Foram fornecidos {len(vc_keyframes)} frames visuais capturados das cenas do vídeo para análise visual direta do produto."
+            )
+        elif vc_scenes and vc_scenes > 0:
+            context_lines.append(f"- O vídeo possui {vc_scenes} cena(s) identificadas.")
+
+    context_section = ""
+    if context_lines:
+        context_section = "--- CONTEXTO EXTRAÍDO DO VÍDEO ---\n" + "\n".join(context_lines) + "\n\n"
+
     prompt = (
         "Você é um especialista em marketing de afiliados brasileiro e copywriter de vídeos virais "
         "para Instagram Reels, TikTok e YouTube Shorts (formato 'Achadinhos').\n"
@@ -116,6 +147,7 @@ def build_affiliate_copy_prompt(
         f"{code_instruction}"
         f"{url_instruction}"
         f"{user_instructions}\n"
+        f"{context_section}"
         "--- REGRAS DE GERAÇÃO ---\n"
         "1. HEADLINES:\n"
         "   - Crie exatamente 5 opções de headlines curtas e magnéticas para sobreposição no vídeo.\n"
@@ -455,14 +487,16 @@ async def generate_affiliate_copy(
     video_path: Optional[str] = None,
     api_key: Optional[str] = None,
     model: Optional[str] = None,
+    video_context: Optional[Union[Any, Dict[str, Any]]] = None,
 ) -> AICopyData:
     """Generate affiliate copy for a viral item with caching and model fallback.
 
     - Checks item-level cache first: returns cached copy immediately if present.
     - Resolves Gemini API key and fallback model ladder.
-    - Executes async content generation.
+    - Extracts multi-signal video context & keyframes if video is provided.
+    - Executes async content generation (multimodal with frame image parts).
     - Parses and validates response with multi-level repair.
-    - Caches copy on item and persists to viral_studio_store if item has an ID.
+    - Caches copy and ai_context_summary on item and persists to viral_studio_store.
     """
     # 1. Caching check: bypass Gemini if item already has ai_copy
     existing_copy = _extract_field(item, "ai_copy")
@@ -553,7 +587,28 @@ async def generate_affiliate_copy(
         if m not in candidate_models:
             candidate_models.append(m)
 
-    # 4. Build prompt
+    # 4. Multi-Signal Video Context extraction (if video file is available and context not supplied)
+    resolved_context = video_context
+    target_video_file = video_path or _extract_field(item, "source_path")
+    if resolved_context is None and target_video_file and os.path.isfile(target_video_file):
+        try:
+            from clippyme.domain.viral_studio_context import extract_viral_context
+
+            resolved_context = extract_viral_context(
+                video_path=target_video_file,
+                source_metadata=_extract_field(item, "source_metadata"),
+            )
+        except Exception as exc:
+            logger.debug("Automatic video context extraction skipped: %s", exc)
+
+    context_summary = None
+    if resolved_context is not None:
+        if hasattr(resolved_context, "to_summary_dict"):
+            context_summary = resolved_context.to_summary_dict()
+        elif isinstance(resolved_context, dict):
+            context_summary = resolved_context
+
+    # 5. Build prompt with context
     product_code = _extract_field(item, "product_code")
     product_url = _extract_field(item, "product_url")
     instructions = (
@@ -567,9 +622,26 @@ async def generate_affiliate_copy(
         product_code=product_code,
         product_url=product_url,
         manual_instructions=instructions,
+        video_context=resolved_context,
     )
 
-    # 5. Call Gemini API across fallback ladder
+    # 6. Prepare multimodal payload with frame images if available
+    contents_payload: Any = prompt
+    keyframes = _extract_field(resolved_context, "keyframes", [])
+    if keyframes and isinstance(keyframes, list):
+        try:
+            from google.genai import types
+
+            image_parts = []
+            for kf in keyframes:
+                if isinstance(kf, bytes) and len(kf) > 0:
+                    image_parts.append(types.Part.from_bytes(data=kf, mime_type="image/jpeg"))
+            if image_parts:
+                contents_payload = [*image_parts, prompt]
+        except Exception as exc:
+            logger.debug("Could not attach visual frame parts: %s", exc)
+
+    # 7. Call Gemini API across fallback ladder
     from google import genai
 
     client = genai.Client(api_key=resolved_api_key)
@@ -579,17 +651,16 @@ async def generate_affiliate_copy(
     for candidate_model in candidate_models:
         try:
             logger.info("generate_affiliate_copy: Attempting model %s", candidate_model)
-            # Check for async client capability
             if hasattr(client, "aio") and hasattr(client.aio, "models"):
                 resp = await client.aio.models.generate_content(
                     model=candidate_model,
-                    contents=prompt,
+                    contents=contents_payload,
                 )
             else:
                 resp = await asyncio.to_thread(
                     client.models.generate_content,
                     model=candidate_model,
-                    contents=prompt,
+                    contents=contents_payload,
                 )
 
             raw_response_text = getattr(resp, "text", None) or ""
@@ -611,14 +682,14 @@ async def generate_affiliate_copy(
             )
         raise ClippyMeError("Gemini returned empty response for affiliate copy")
 
-    # 6. Parse and validate response
+    # 8. Parse and validate response
     copy_data = parse_affiliate_copy_response(
         raw_text=raw_response_text,
         default_cta=default_cta,
         product_code=product_code,
     )
 
-    # 7. Reconcile with existing user edits (preserving custom captions/headlines)
+    # 9. Reconcile with existing user edits (preserving custom captions/headlines)
     effective_selected_headline = (
         _extract_field(item, "manual_headline")
         or _extract_field(item, "selected_headline")
@@ -640,6 +711,8 @@ async def generate_affiliate_copy(
         item["ai_copy"] = copy_data.model_dump()
         item["selected_headline"] = clean_effective_headline
         item["caption"] = effective_caption
+        if context_summary:
+            item["ai_context_summary"] = context_summary
         if video_path and not item.get("source_path"):
             item["source_path"] = video_path
     else:
@@ -647,25 +720,27 @@ async def generate_affiliate_copy(
             item.ai_copy = copy_data
             item.selected_headline = clean_effective_headline
             item.caption = effective_caption
+            if context_summary:
+                item.ai_context_summary = context_summary
             if video_path and not getattr(item, "source_path", None):
                 item.source_path = video_path
         except Exception as e:
             logger.debug("Could not assign ai_copy directly to item object: %s", e)
 
-    # 8. Persist to store if item has an ID
+    # 10. Persist to store if item has an ID
     item_id = _extract_field(item, "id") or _extract_field(item, "item_id")
     if item_id:
         try:
             from clippyme.domain import viral_studio_store
 
-            viral_studio_store.update_item(
-                item_id,
-                {
-                    "ai_copy": copy_data.model_dump(),
-                    "selected_headline": clean_effective_headline,
-                    "caption": effective_caption,
-                },
-            )
+            update_dict: Dict[str, Any] = {
+                "ai_copy": copy_data.model_dump(),
+                "selected_headline": clean_effective_headline,
+                "caption": effective_caption,
+            }
+            if context_summary:
+                update_dict["ai_context_summary"] = context_summary
+            viral_studio_store.update_item(item_id, update_dict)
         except Exception as exc:
             logger.debug("Could not persist ai_copy to viral_studio_store: %s", exc)
 
