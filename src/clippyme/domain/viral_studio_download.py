@@ -240,6 +240,10 @@ def download_viral_video(url: str, output_path: str, timeout: int = 120) -> str:
                 "description": extracted_info.get("description") or "",
                 "tags": extracted_info.get("tags") or [],
                 "uploader": extracted_info.get("uploader") or "",
+                "view_count": extracted_info.get("view_count"),
+                "like_count": extracted_info.get("like_count"),
+                "comment_count": extracted_info.get("comment_count"),
+                "repost_count": extracted_info.get("repost_count"),
             }
         _write_manifest(destination, source_url, metadata=meta_dict)
         return str(destination)

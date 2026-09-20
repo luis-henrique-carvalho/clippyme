@@ -157,3 +157,47 @@ def test_extract_audio_transcript_dict_formats():
         res = _extract_audio_transcript("dummy.mp4")
         assert res == "Texto completo direto"
 
+
+def test_extract_viral_context_saves_keyframes_and_generates_urls(tmp_path):
+    """extract_viral_context writes keyframe images to keyframes_dir and populates keyframe_urls."""
+    video = tmp_path / "video.mp4"
+    video.write_bytes(b"dummy video data")
+    kf_dir = tmp_path / "keyframes"
+
+    source_meta = {
+        "title": "Produto Teste",
+        "description": "Descrição original",
+        "uploader": "@canal_test",
+        "tags": ["#tag1", "#tag2"],
+    }
+
+    with patch("clippyme.domain.viral_studio_context._probe_duration", return_value=10.0), \
+         patch("clippyme.domain.viral_studio_context._detect_scene_timestamps", return_value=([2.0, 5.0], 2)), \
+         patch("clippyme.domain.viral_studio_context._extract_frame_jpeg", side_effect=[b"jpeg_1", b"jpeg_2"]), \
+         patch("clippyme.domain.viral_studio_context._extract_audio_transcript", return_value="Transcrição de teste"):
+
+        ctx = extract_viral_context(
+            str(video),
+            source_metadata=source_meta,
+            max_frames=2,
+            keyframes_dir=str(kf_dir),
+            batch_id="batch-456",
+            item_id="item-789",
+        )
+
+        assert len(ctx.keyframes) == 2
+        assert len(ctx.keyframe_paths) == 2
+        assert os.path.isfile(ctx.keyframe_paths[0])
+        assert open(ctx.keyframe_paths[0], "rb").read() == b"jpeg_1"
+        assert open(ctx.keyframe_paths[1], "rb").read() == b"jpeg_2"
+        assert ctx.keyframe_urls == [
+            "/videos/viral_studio/batch-456/item-789/keyframes/scene_0.jpg",
+            "/videos/viral_studio/batch-456/item-789/keyframes/scene_1.jpg",
+        ]
+        assert ctx.uploader == "@canal_test"
+        summary = ctx.to_summary_dict()
+        assert summary["keyframe_urls"] == ctx.keyframe_urls
+        assert summary["uploader"] == "@canal_test"
+        assert summary["transcript"] == "Transcrição de teste"
+
+

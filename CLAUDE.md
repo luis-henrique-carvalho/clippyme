@@ -268,7 +268,11 @@ through verbatim (the frontend parses per-platform 429 daily limits).
   committed. Pre-commit secret scan: `git config core.hooksPath .githooks`.
   With `TRUST_PROXY=1`, `client_ip` reads the **last** `X-Forwarded-For`
   hop (the shipped nginx APPENDS via `$proxy_add_x_forwarded_for` — the
-  first hop is client-forgeable); keep append+last-hop in sync.
+- **Viral Content Studio Rules**:
+  * `viral_studio_context.py`: Extract multi-signal context (yt-dlp title/caption/tags, keyframe JPEGs downscaled to ~512px, speech transcript). `_extract_audio_transcript` must use dynamic import to stay host-testable without cv2/torch.
+  * `viral_studio_copy.py`: Multimodal Gemini copy generation passes inline JPEG parts (`types.Part.from_bytes`) + context summary, guaranteeing zero product hallucinations at sub-cent token cost.
+  * `job_runner.py` Failure Propagation: Subprocess exits with non-zero returncodes (including SIGSEGV 139 / GPU coredump) MUST sync terminal `FAILED` state to `viral_studio_store` and append structured `ERROR` telemetry so items never stay stuck in `ANALYZING` or `DOWNLOADING`.
+  * **Frontend Observability**: Processing cards must remain inspectable (`Ver Progresso & Logs`), auto-selecting the "Logs & Atividade" tab to provide real-time telemetry.
 
 ## API endpoints
 

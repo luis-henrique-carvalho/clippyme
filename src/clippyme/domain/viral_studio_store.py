@@ -646,6 +646,8 @@ def create_batch(batch: Union[Dict[str, Any], Any]) -> Dict[str, Any]:
             item.setdefault("error_message", None)
             item.setdefault("source_metadata", None)
             item.setdefault("ai_context_summary", None)
+            item.setdefault("ai_telemetry", None)
+            item.setdefault("keyframe_urls", [])
             item.setdefault("logs", [])
             item.setdefault("created_at", now)
             item.setdefault("updated_at", now)
@@ -756,6 +758,8 @@ def update_item(item_id: str, updates: Union[Dict[str, Any], Any]) -> Dict[str, 
                             "job_id",
                             "source_metadata",
                             "ai_context_summary",
+                            "ai_telemetry",
+                            "keyframe_urls",
                             "logs",
                             "publication_records",
                         ):

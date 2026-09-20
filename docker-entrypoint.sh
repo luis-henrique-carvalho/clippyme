@@ -31,15 +31,22 @@ if [ "$(id -u)" = "0" ] && [ "${1:-}" = "uvicorn" ]; then
         fi
     done
 
+    # Match host user UID/GID so host bind mounts (data/, output/) are owned
+    # by the developer on the host machine without permission errors in IDEs.
+    host_uid=$(stat -c '%u' /app 2>/dev/null || echo "")
+    host_gid=$(stat -c '%g' /app 2>/dev/null || echo "")
+    if [ -n "$host_uid" ] && [ "$host_uid" != "0" ] && [ "$host_uid" != "$(id -u appuser)" ]; then
+        groupmod -o -g "$host_gid" appuser 2>/dev/null || true
+        usermod -o -u "$host_uid" -g "$host_gid" appuser 2>/dev/null || true
+    fi
+
     for d in /app/data /app/output /app/uploads /app/.cache /app/.config /app/data/cache; do
         mkdir -p "$d"
     done
-    # data/ is small (config, cookies, cache, fonts, bin) — safe to recurse.
-    chown -R appuser:appuser /app/data /app/.cache /app/.config 2>/dev/null || true
+    # data/ and output/ ownership normalized to appuser (matching host UID)
+    chown -R appuser:appuser /app/data /app/output /app/uploads /app/.cache /app/.config 2>/dev/null || true
+    chmod -R a+rX /app/output 2>/dev/null || true
     chmod 777 /app/.cache /app/.config 2>/dev/null || true
-    # output/ and uploads/ can be large; their contents are already
-    # appuser-created, so only the top-level dir needs fixing.
-    chown appuser:appuser /app/output /app/uploads 2>/dev/null || true
 
     export HF_HOME=/app/data/cache/huggingface
     export MPLCONFIGDIR=/app/data/cache/matplotlib

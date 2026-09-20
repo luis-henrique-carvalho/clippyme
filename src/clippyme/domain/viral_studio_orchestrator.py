@@ -237,17 +237,34 @@ async def process_viral_item(item_id: str) -> Dict[str, Any]:
             item_obj = ViralItem.model_validate(item)
 
             # Extract multi-signal context
-            video_context = viral_studio_context.extract_viral_context(
-                video_path=source_path,
-                source_metadata=item.get("source_metadata") or meta,
+            keyframes_dir = os.path.join(_get_output_dir(), "viral_studio", batch_id, item_id, "keyframes")
+            try:
+                video_context = viral_studio_context.extract_viral_context(
+                    video_path=source_path,
+                    source_metadata=item.get("source_metadata") or meta,
+                    keyframes_dir=keyframes_dir,
+                    batch_id=batch_id,
+                    item_id=item_id,
+                )
+            except TypeError:
+                video_context = viral_studio_context.extract_viral_context(
+                    video_path=source_path,
+                    source_metadata=item.get("source_metadata") or meta,
+                )
+            context_summary = video_context.to_summary_dict() if hasattr(video_context, "to_summary_dict") else {}
+            keyframe_urls = getattr(video_context, "keyframe_urls", []) or []
+            viral_studio_store.update_item(
+                item_id,
+                {
+                    "ai_context_summary": context_summary,
+                    "keyframe_urls": keyframe_urls,
+                },
             )
-            context_summary = video_context.to_summary_dict()
-            viral_studio_store.update_item(item_id, {"ai_context_summary": context_summary})
 
             append_item_log(
                 item_id,
                 "CONTEXT",
-                f"Contexto extraído: {video_context.scenes_count} cenas detectadas ({len(video_context.keyframes)} frames), áudio {'com fala identificada' if video_context.has_audio else 'sem fala/música'}",
+                f"Contexto extraído: {getattr(video_context, 'scenes_count', 1)} cenas detectadas ({len(getattr(video_context, 'keyframes', []))} frames), áudio {'com fala identificada' if getattr(video_context, 'has_audio', False) else 'sem fala/música'}",
                 details=context_summary,
             )
 
@@ -300,6 +317,12 @@ async def process_viral_item(item_id: str) -> Dict[str, Any]:
                 or f"Confira no link!\n📌 Produto {item.get('product_code') or ''}"
             )
 
+            # Fetch refreshed item to grab any newly attached ai_telemetry
+            refreshed_item = viral_studio_store.get_item(item_id) or {}
+            ai_telemetry = refreshed_item.get("ai_telemetry") or (
+                item_obj.ai_telemetry if hasattr(item_obj, "ai_telemetry") else None
+            )
+
             viral_studio_store.update_item(
                 item_id,
                 {
@@ -307,17 +330,27 @@ async def process_viral_item(item_id: str) -> Dict[str, Any]:
                     "caption": caption,
                     "ai_copy": copy_data.model_dump() if hasattr(copy_data, "model_dump") else copy_data,
                     "ai_context_summary": context_summary,
+                    "keyframe_urls": keyframe_urls or refreshed_item.get("keyframe_urls", []),
                 },
             )
+
+            log_details: Dict[str, Any] = {
+                "selected_headline": selected_headline,
+                "headlines_count": len(copy_data.get("headlines") if isinstance(copy_data, dict) else copy_data.headlines),
+            }
+            if ai_telemetry and isinstance(ai_telemetry, dict):
+                log_details.update({
+                    "model": ai_telemetry.get("model"),
+                    "total_tokens": ai_telemetry.get("total_tokens"),
+                    "latency_ms": ai_telemetry.get("latency_ms"),
+                    "estimated_cost_usd": ai_telemetry.get("estimated_cost_usd"),
+                })
 
             append_item_log(
                 item_id,
                 "AI_COPY",
-                f"Copy comercial gerada com sucesso para '{copy_product}'",
-                details={
-                    "selected_headline": selected_headline,
-                    "headlines_count": len(copy_data.get("headlines") if isinstance(copy_data, dict) else copy_data.headlines),
-                },
+                f"Copy comercial gerada com sucesso para '{copy_product}'" + (f" ({ai_telemetry.get('model', 'gemini')} · {ai_telemetry.get('latency_ms', 0)}ms)" if ai_telemetry else ""),
+                details=log_details,
             )
 
             # ------------------------------------------------------------------

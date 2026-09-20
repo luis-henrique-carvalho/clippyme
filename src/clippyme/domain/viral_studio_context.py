@@ -26,10 +26,13 @@ class VideoContext:
     """Multi-signal contextual analysis of a viral video item."""
 
     keyframes: List[bytes] = field(default_factory=list)
+    keyframe_urls: List[str] = field(default_factory=list)
+    keyframe_paths: List[str] = field(default_factory=list)
     transcript: str = ""
     original_caption: str = ""
     title: str = ""
     tags: List[str] = field(default_factory=list)
+    uploader: str = ""
     scenes_count: int = 0
     has_audio: bool = False
     duration: float = 0.0
@@ -39,9 +42,15 @@ class VideoContext:
         return {
             "scenes_count": self.scenes_count,
             "keyframes_count": len(self.keyframes),
+            "keyframe_urls": self.keyframe_urls,
             "has_audio": bool(self.has_audio or (self.transcript and self.transcript.strip())),
+            "transcript": self.transcript,
             "transcript_words": len(self.transcript.split()) if self.transcript else 0,
             "has_original_caption": bool(self.original_caption and self.original_caption.strip()),
+            "original_caption": self.original_caption,
+            "title": self.title,
+            "tags": self.tags,
+            "uploader": self.uploader,
             "duration": round(self.duration, 2),
         }
 
@@ -209,6 +218,9 @@ def extract_viral_context(
     video_path: str,
     source_metadata: Optional[dict[str, Any]] = None,
     max_frames: int = 4,
+    keyframes_dir: Optional[str] = None,
+    batch_id: Optional[str] = None,
+    item_id: Optional[str] = None,
 ) -> VideoContext:
     """Extract complete multi-signal context from a video file."""
     if not video_path or not os.path.isfile(video_path):
@@ -227,24 +239,61 @@ def extract_viral_context(
     tags = meta.get("tags") or []
     if isinstance(tags, str):
         tags = [tags]
+    uploader = meta.get("uploader") or meta.get("channel") or meta.get("author") or meta.get("creator") or ""
+
+    # Resolve keyframes destination directory
+    target_kf_dir = keyframes_dir
+    if not target_kf_dir and batch_id and item_id:
+        out_dir = os.environ.get("CLIPPYME_OUTPUT_DIR") or "output"
+        target_kf_dir = os.path.join(out_dir, "viral_studio", batch_id, item_id, "keyframes")
+
+    if target_kf_dir:
+        try:
+            os.makedirs(target_kf_dir, exist_ok=True)
+        except Exception as exc:
+            logger.debug("Could not create keyframes directory %s: %s", target_kf_dir, exc)
 
     # Extract scene timestamps & keyframe images
     timestamps, scenes_count = _detect_scene_timestamps(video_path, duration, max_scenes=max_frames)
     keyframes: list[bytes] = []
-    for ts in timestamps:
+    keyframe_paths: list[str] = []
+    keyframe_urls: list[str] = []
+
+    for i, ts in enumerate(timestamps):
         frame_bytes = _extract_frame_jpeg(video_path, ts)
         if frame_bytes:
             keyframes.append(frame_bytes)
+            if target_kf_dir and os.path.isdir(target_kf_dir):
+                kf_filename = f"scene_{i}.jpg"
+                kf_path = os.path.join(target_kf_dir, kf_filename)
+                try:
+                    with open(kf_path, "wb") as f:
+                        f.write(frame_bytes)
+                    keyframe_paths.append(kf_path)
+                    if batch_id and item_id:
+                        keyframe_urls.append(f"/videos/viral_studio/{batch_id}/{item_id}/keyframes/{kf_filename}")
+                    else:
+                        out_dir = os.environ.get("CLIPPYME_OUTPUT_DIR") or "output"
+                        try:
+                            rel = os.path.relpath(kf_path, out_dir).replace(os.sep, "/")
+                            keyframe_urls.append(f"/videos/{rel}")
+                        except Exception:
+                            keyframe_urls.append(f"/videos/viral_studio/default/item/keyframes/{kf_filename}")
+                except Exception as exc:
+                    logger.debug("Could not write keyframe file %s: %s", kf_path, exc)
 
     # Extract speech / audio transcript
     transcript = _extract_audio_transcript(video_path)
 
     return VideoContext(
         keyframes=keyframes,
+        keyframe_urls=keyframe_urls,
+        keyframe_paths=keyframe_paths,
         transcript=transcript,
         original_caption=original_caption,
         title=title,
         tags=tags,
+        uploader=uploader,
         scenes_count=scenes_count,
         has_audio=bool(transcript.strip()),
         duration=duration,

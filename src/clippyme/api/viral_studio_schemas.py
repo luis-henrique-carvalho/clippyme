@@ -530,6 +530,8 @@ class ViralItem(BaseModel):
     job_id: Optional[str] = None
     source_metadata: Optional[Dict[str, Any]] = None
     ai_context_summary: Optional[Dict[str, Any]] = None
+    ai_telemetry: Optional[Dict[str, Any]] = None
+    keyframe_urls: List[str] = Field(default_factory=list)
     logs: List[Dict[str, Any]] = Field(default_factory=list)
     publication_records: List[Dict[str, Any]] = Field(default_factory=list)
     created_at: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())

@@ -14,6 +14,7 @@ import asyncio
 import json
 import logging
 import re
+import time
 from typing import Any, Dict, List, Optional, Union
 
 from clippyme.api.viral_studio_schemas import AICopyData, Brand, ViralItem
@@ -22,6 +23,16 @@ from clippyme.pipeline.gemini_service import _redact_key
 from clippyme.storage.config_store import load_persistent_config
 
 logger = logging.getLogger("clippyme.viral_studio_copy")
+
+# Per-model pricing ($ per 1M tokens)
+MODEL_PRICING = {
+    "gemini-3.5-flash": {"input": 1.50, "output": 9.00},
+    "gemini-3.1-pro-preview": {"input": 2.00, "output": 12.00},
+    "gemini-2.5-flash": {"input": 0.30, "output": 2.50},
+    "gemini-2.5-flash-lite": {"input": 0.10, "output": 0.40},
+    "gemini-2.5-pro": {"input": 1.25, "output": 10.00},
+    "gemini-2.0-flash": {"input": 0.10, "output": 0.40},
+}
 
 # Clean-up regex patterns
 _CODE_FENCE_OPEN = re.compile(r"^\s*```(?:json)?\s*", re.IGNORECASE)
@@ -597,6 +608,8 @@ async def generate_affiliate_copy(
             resolved_context = extract_viral_context(
                 video_path=target_video_file,
                 source_metadata=_extract_field(item, "source_metadata"),
+                batch_id=_extract_field(item, "batch_id"),
+                item_id=_extract_field(item, "id") or _extract_field(item, "item_id"),
             )
         except Exception as exc:
             logger.debug("Automatic video context extraction skipped: %s", exc)
@@ -647,10 +660,16 @@ async def generate_affiliate_copy(
     client = genai.Client(api_key=resolved_api_key)
     raw_response_text: Optional[str] = None
     last_error: Optional[Exception] = None
+    succeeded_model: Optional[str] = None
+    latency_ms: int = 0
+    prompt_tokens: int = 0
+    candidate_tokens: int = 0
+    total_tokens: int = 0
 
     for candidate_model in candidate_models:
         try:
             logger.info("generate_affiliate_copy: Attempting model %s", candidate_model)
+            t0 = time.monotonic()
             if hasattr(client, "aio") and hasattr(client.aio, "models"):
                 resp = await client.aio.models.generate_content(
                     model=candidate_model,
@@ -662,10 +681,17 @@ async def generate_affiliate_copy(
                     model=candidate_model,
                     contents=contents_payload,
                 )
+            latency_ms = max(1, int((time.monotonic() - t0) * 1000))
 
             raw_response_text = getattr(resp, "text", None) or ""
             if raw_response_text.strip():
-                logger.info("generate_affiliate_copy: Success with model %s", candidate_model)
+                succeeded_model = candidate_model
+                usage = getattr(resp, "usage_metadata", None)
+                if usage:
+                    prompt_tokens = getattr(usage, "prompt_token_count", 0) or 0
+                    candidate_tokens = getattr(usage, "candidates_token_count", 0) or 0
+                    total_tokens = getattr(usage, "total_token_count", 0) or (prompt_tokens + candidate_tokens)
+                logger.info("generate_affiliate_copy: Success with model %s (%d ms)", candidate_model, latency_ms)
                 break
         except Exception as exc:
             last_error = exc
@@ -681,6 +707,33 @@ async def generate_affiliate_copy(
                 f"Gemini affiliate copy generation failed: {_redact_key(str(last_error))}"
             )
         raise ClippyMeError("Gemini returned empty response for affiliate copy")
+
+    # Fallback token estimation if usage metadata was not returned by API
+    if not prompt_tokens and prompt:
+        prompt_tokens = max(1, len(prompt) // 4)
+    if not candidate_tokens and raw_response_text:
+        candidate_tokens = max(1, len(raw_response_text) // 4)
+    if not total_tokens:
+        total_tokens = prompt_tokens + candidate_tokens
+
+    model_name = succeeded_model or configured_model
+    pricing = MODEL_PRICING.get(model_name, {"input": 0.30, "output": 2.50})
+    estimated_cost_usd = round(
+        (prompt_tokens * pricing["input"] + candidate_tokens * pricing["output"]) / 1_000_000, 6
+    )
+
+    telemetry_data = {
+        "model": model_name,
+        "model_used": model_name,
+        "prompt_tokens": prompt_tokens,
+        "candidate_tokens": candidate_tokens,
+        "total_tokens": total_tokens,
+        "estimated_cost_usd": estimated_cost_usd,
+        "cost_usd": estimated_cost_usd,
+        "latency_ms": latency_ms,
+        "prompt": prompt,
+        "raw_response": raw_response_text,
+    }
 
     # 8. Parse and validate response
     copy_data = parse_affiliate_copy_response(
@@ -707,10 +760,15 @@ async def generate_affiliate_copy(
         copy_data.headlines.insert(0, clean_effective_headline[:300])
     copy_data.headlines = copy_data.headlines[:10]
 
+    keyframe_urls = getattr(resolved_context, "keyframe_urls", []) if resolved_context else []
+
     if isinstance(item, dict):
         item["ai_copy"] = copy_data.model_dump()
         item["selected_headline"] = clean_effective_headline
         item["caption"] = effective_caption
+        item["ai_telemetry"] = telemetry_data
+        if keyframe_urls:
+            item["keyframe_urls"] = keyframe_urls
         if context_summary:
             item["ai_context_summary"] = context_summary
         if video_path and not item.get("source_path"):
@@ -720,6 +778,9 @@ async def generate_affiliate_copy(
             item.ai_copy = copy_data
             item.selected_headline = clean_effective_headline
             item.caption = effective_caption
+            item.ai_telemetry = telemetry_data
+            if keyframe_urls:
+                item.keyframe_urls = keyframe_urls
             if context_summary:
                 item.ai_context_summary = context_summary
             if video_path and not getattr(item, "source_path", None):
@@ -737,9 +798,12 @@ async def generate_affiliate_copy(
                 "ai_copy": copy_data.model_dump(),
                 "selected_headline": clean_effective_headline,
                 "caption": effective_caption,
+                "ai_telemetry": telemetry_data,
             }
             if context_summary:
                 update_dict["ai_context_summary"] = context_summary
+            if keyframe_urls:
+                update_dict["keyframe_urls"] = keyframe_urls
             viral_studio_store.update_item(item_id, update_dict)
         except Exception as exc:
             logger.debug("Could not persist ai_copy to viral_studio_store: %s", exc)

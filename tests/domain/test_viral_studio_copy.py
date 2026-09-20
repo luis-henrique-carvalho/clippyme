@@ -831,5 +831,61 @@ def test_generate_affiliate_copy_multimodal_frames_and_context_summary(sample_br
         assert len(call_kwargs["contents"]) >= 2
 
 
+def test_generate_affiliate_copy_captures_llm_telemetry(sample_brand, sample_item):
+    """generate_affiliate_copy captures latency, token counts, cost estimate, and raw response in ai_telemetry."""
+    mock_resp = MagicMock()
+    mock_resp.text = """{
+      "product": "Mini Selador",
+      "product_description": "Selador térmico prático",
+      "headlines": ["H1", "H2", "H3", "H4", "H5"],
+      "selected_headline": "H1",
+      "caption": "Legenda completa",
+      "hashtags": ["#achadinhos"]
+    }"""
+    mock_usage = MagicMock()
+    mock_usage.prompt_token_count = 500
+    mock_usage.candidates_token_count = 150
+    mock_usage.total_token_count = 650
+    mock_resp.usage_metadata = mock_usage
+
+    mock_models = AsyncMock()
+    mock_models.generate_content.return_value = mock_resp
+    mock_client = MagicMock()
+    mock_client.aio.models = mock_models
+
+    item_dict = {
+        "id": "item-telemetry-01",
+        "source_url": "https://instagram.com/reel/123",
+        "product_code": "TEL-01",
+    }
+
+    with patch("google.genai.Client", return_value=mock_client), \
+         patch("clippyme.domain.viral_studio_store.update_item") as mock_update:
+
+        copy_res = asyncio.run(viral_studio_copy.generate_affiliate_copy(
+            brand=sample_brand,
+            item=item_dict,
+            api_key="test-key",
+            model="gemini-2.5-flash",
+        ))
+
+        assert copy_res.product == "Mini Selador"
+        assert "ai_telemetry" in item_dict
+        telemetry = item_dict["ai_telemetry"]
+        assert telemetry["model"] == "gemini-2.5-flash"
+        assert telemetry["prompt_tokens"] == 500
+        assert telemetry["candidate_tokens"] == 150
+        assert telemetry["total_tokens"] == 650
+        assert telemetry["latency_ms"] >= 0
+        assert telemetry["estimated_cost_usd"] > 0
+        assert "Mini Selador" in telemetry["raw_response"]
+        assert "Você é um especialista" in telemetry["prompt"]
+        assert mock_update.called
+        update_args = mock_update.call_args[0][1]
+        assert "ai_telemetry" in update_args
+        assert update_args["ai_telemetry"]["total_tokens"] == 650
+
+
+
 
 
