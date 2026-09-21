@@ -60,6 +60,19 @@ def test_plan_recovery_classification():
     assert sorted(job_id for job_id, _ in plan.mark_failed) == [JOB_P, "paused"]
 
 
+def test_recover_reenqueues_interrupted_viral_studio_job(tmp_path):
+    jobs, queue, counts, _ = _recover(tmp_path, {
+        JOB_P: {
+            "status": "processing", "job_type": "viral_studio",
+            "cmd": ["python", "-m", "clippyme.domain.viral_studio_orchestrator", "--item-id", "item-1"],
+            "output_dir": str(tmp_path / "viral"), "pid": None,
+        }
+    })
+    assert counts["resumed"] == 1
+    assert queue.get_nowait() == JOB_P
+    assert jobs[JOB_P]["job_type"] == "viral_studio"
+
+
 def test_kill_stale_tree_refuses_on_cmd_mismatch(monkeypatch):
     class FakeProc:
         def __init__(self, pid):

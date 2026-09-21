@@ -8,14 +8,24 @@ import { SettingsView, HistoryView } from './views.jsx';
 
 const getConfig = vi.fn();
 const saveConfig = vi.fn();
+const cookiesStatus = vi.fn(async () => ({ configured: false, youtube: false, instagram: false, tiktok: false, legacy: false }));
+const uploadPlatformCookies = vi.fn(async () => ({ status: 'ok' }));
+const deletePlatformCookies = vi.fn(async () => ({ status: 'ok' }));
 
 vi.mock('./realApi', () => ({
   getConfig: (...a) => getConfig(...a),
   saveConfig: (...a) => saveConfig(...a),
   getModels: vi.fn(async () => ({ models: [] })),
-  cookiesStatus: vi.fn(async () => ({ configured: false })),
+  getLocalAIModels: vi.fn(async () => ({
+    lm_studio: { online: false, base_url: '', models: [] },
+    ollama: { online: false, base_url: '', models: [] },
+    models: [],
+  })),
+  cookiesStatus: (...a) => cookiesStatus(...a),
   uploadCookies: vi.fn(),
   deleteCookies: vi.fn(),
+  uploadPlatformCookies: (...a) => uploadPlatformCookies(...a),
+  deletePlatformCookies: (...a) => deletePlatformCookies(...a),
   getZernio: vi.fn(async () => ({ configured: false })),
   saveZernio: vi.fn(),
   discoverZernioAccounts: vi.fn(),
@@ -124,4 +134,96 @@ test('history row shows the video title and a published-count badge when clips w
   expect(screen.getByText('1 published')).toBeInTheDocument();
   expect(screen.getByText('other video')).toBeInTheDocument();
   expect(screen.queryByText('0 published')).toBeNull();
+});
+
+// SettingsView — platform cookie rows
+test('cookie cards render YouTube, Instagram, and TikTok rows with status badges', async () => {
+  getConfig.mockResolvedValue(EMPTY_CONFIG);
+  cookiesStatus.mockResolvedValue({
+    configured: true,
+    youtube: true,
+    instagram: false,
+    tiktok: false,
+    legacy: false,
+  });
+  mount();
+
+  await waitFor(() => expect(screen.getByText('YouTube cookies')).toBeInTheDocument());
+  expect(screen.getByText('Instagram cookies')).toBeInTheDocument();
+  expect(screen.getByText('TikTok cookies')).toBeInTheDocument();
+
+  // YouTube should show Configurado
+  const ytBadge = screen.getByText('YouTube cookies').parentElement.querySelector('.badge');
+  expect(ytBadge).toHaveTextContent('Configurado');
+
+  // Instagram should show Não configurado
+  const igBadge = screen.getByText('Instagram cookies').parentElement.querySelector('.badge');
+  expect(igBadge).toHaveTextContent('Não configurado');
+
+  // Delete button should be present only for configured platforms (YouTube)
+  expect(screen.getByRole('button', { name: 'Remove YouTube cookies' })).toBeInTheDocument();
+  expect(screen.queryByRole('button', { name: 'Remove Instagram cookies' })).toBeNull();
+});
+
+test('uploading platform cookies calls uploadPlatformCookies and refreshes status', async () => {
+  getConfig.mockResolvedValue(EMPTY_CONFIG);
+  cookiesStatus
+    .mockResolvedValueOnce({ configured: false, youtube: false, instagram: false, tiktok: false, legacy: false })
+    .mockResolvedValueOnce({ configured: true, youtube: true, instagram: false, tiktok: false, legacy: false });
+
+  const pushToast = mount();
+  await waitFor(() => expect(screen.getByText('YouTube cookies')).toBeInTheDocument());
+
+  const file = new File(['# Netscape HTTP Cookie File\n'], 'youtube.txt', { type: 'text/plain' });
+  const uploadLabel = screen.getByLabelText('Upload YouTube cookies');
+  const fileInput = uploadLabel.querySelector('input[type="file"]');
+
+  fireEvent.change(fileInput, { target: { files: [file] } });
+
+  await waitFor(() => expect(uploadPlatformCookies).toHaveBeenCalledWith('youtube', file));
+  expect(pushToast).toHaveBeenCalledWith('success', 'Youtube cookies uploaded');
+});
+
+test('removing platform cookies calls deletePlatformCookies and refreshes status', async () => {
+  getConfig.mockResolvedValue(EMPTY_CONFIG);
+  cookiesStatus
+    .mockResolvedValueOnce({ configured: true, youtube: true, instagram: false, tiktok: false, legacy: false })
+    .mockResolvedValueOnce({ configured: false, youtube: false, instagram: false, tiktok: false, legacy: false });
+
+  const pushToast = mount();
+  await waitFor(() => expect(screen.getByRole('button', { name: 'Remove YouTube cookies' })).toBeInTheDocument());
+
+  fireEvent.click(screen.getByRole('button', { name: 'Remove YouTube cookies' }));
+
+  await waitFor(() => expect(deletePlatformCookies).toHaveBeenCalledWith('youtube'));
+  expect(pushToast).toHaveBeenCalledWith('info', 'Youtube cookies removed');
+});
+
+test('SettingsView renders local AI servers status cards for LM Studio and Ollama', async () => {
+  getConfig.mockResolvedValue(EMPTY_CONFIG);
+  const realApi = await import('./realApi');
+  vi.mocked(realApi.getLocalAIModels).mockResolvedValueOnce({
+    lm_studio: {
+      online: true,
+      base_url: 'http://localhost:1234',
+      models: [{ id: 'qwen2.5-7b-instruct', name: 'Qwen 2.5 7B' }],
+    },
+    ollama: {
+      online: false,
+      base_url: 'http://localhost:11434',
+      models: [],
+    },
+    models: [],
+  });
+
+  mount();
+
+  await waitFor(() => expect(screen.getByText('Servidores de IA Local')).toBeInTheDocument());
+  expect(screen.getByText('LM Studio')).toBeInTheDocument();
+  expect(screen.getByText('Ollama')).toBeInTheDocument();
+
+  // LM Studio connected with 1 model
+  expect(screen.getByText('Conectado (1 modelo)')).toBeInTheDocument();
+  // Ollama disconnected
+  expect(screen.getByText('Desconectado')).toBeInTheDocument();
 });

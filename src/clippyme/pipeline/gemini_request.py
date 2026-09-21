@@ -12,12 +12,12 @@ import time
 
 # Per-model pricing ($ per 1M tokens) — update when Google changes rates
 MODEL_PRICING = {
+    "gemini-3.6-flash": {"input": 1.50, "output": 9.00},
     "gemini-3.5-flash": {"input": 1.50, "output": 9.00},
     "gemini-3.1-pro-preview": {"input": 2.00, "output": 12.00},
-    "gemini-2.5-flash": {"input": 0.30, "output": 2.50},
-    "gemini-2.5-flash-lite": {"input": 0.10, "output": 0.40},
-    "gemini-2.5-pro": {"input": 1.25, "output": 10.00},
+    "gemini-3.1-flash-lite": {"input": 0.10, "output": 0.40},
     "gemini-2.0-flash": {"input": 0.10, "output": 0.40},
+    "gemini-2.0-flash-lite": {"input": 0.075, "output": 0.30},
 }
 
 GEMINI_PROMPT_TEMPLATE = """
@@ -395,8 +395,7 @@ def build_model_chain(primary_model: str, fallback_models: str | None = None) ->
         # NB: pro models (gemini-*-pro-*) have limit:0 on the free API tier —
         # they 429 instantly, so they are intentionally NOT in the default
         # chain. Add one here (or via GEMINI_FALLBACK_MODELS) only on a paid plan.
-        "gemini-3-flash-preview,gemini-2.5-flash,"
-        "gemini-3.1-flash-lite,gemini-2.5-flash-lite"
+        "gemini-3.6-flash,gemini-3.5-flash,gemini-3.1-flash-lite"
     )
     models = [primary_model, *(part.strip() for part in raw.split(","))]
     return list(dict.fromkeys(model for model in models if model))

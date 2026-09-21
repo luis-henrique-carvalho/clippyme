@@ -14,6 +14,7 @@ tqdm==4.67.3
 # Earlier 2026.3.x releases are vulnerable, so the floor must not permit them.
 yt-dlp>=2026.6.9,<2027
 faster-whisper==1.2.1
+openai-whisper>=20231117
 # Capped below 2.0 so an unattended rebuild can't pull a breaking major
 # release of the SDK (gemini_service / gemini_parser depend on the 1.x API).
 google-genai>=1.70.0,<2.0.0

@@ -19,7 +19,7 @@ const CSP = [
   "img-src 'self' data: blob: https://cdn.simpleicons.org",
   "media-src 'self' blob:",
   "font-src 'self' data: https://fonts.gstatic.com",
-  "connect-src 'self'",
+  "connect-src 'self' http://localhost:1234 http://127.0.0.1:1234 http://localhost:11434 http://127.0.0.1:11434",
   "base-uri 'self'",
   "form-action 'self'",
   "frame-ancestors 'none'",
@@ -67,22 +67,24 @@ export default defineConfig({
     allowedHosts: [
       'localhost',
       '127.0.0.1',
+      '.ngrok-free.app',
+      '.ngrok-free.dev',
     ],
     proxy: {
       '/api': {
-        target: 'http://backend:8000',
+        target: 'http://127.0.0.1:8000',
         changeOrigin: true,
       },
       '/videos': {
-        target: 'http://backend:8000',
+        target: 'http://127.0.0.1:8000',
         changeOrigin: true,
       },
       '/thumbnails': {
-        target: 'http://backend:8000',
+        target: 'http://127.0.0.1:8000',
         changeOrigin: true,
       },
       '/fonts': {
-        target: 'http://backend:8000',
+        target: 'http://127.0.0.1:8000',
         changeOrigin: true,
       }
     }

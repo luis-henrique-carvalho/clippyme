@@ -51,6 +51,7 @@ data/cookies.txt
 # Cache dirs
 .cache/
 .config/
+.triton/
 # Multi-agent Skills
 .agents/
 .agent/
@@ -70,5 +71,11 @@ fonts/NotoColorEmoji.ttf
 # Isolated feature worktrees
 .worktrees/
 
-# Local Codex CLI settings
-.codex/
+# Crash dumps
+core
+core.*
+gpucore*
+*.gpu
+
+# Logs
+logs.md

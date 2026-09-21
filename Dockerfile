@@ -66,8 +66,8 @@ ENV NVIDIA_DRIVER_CAPABILITIES=compute,utility
 # Stage 2b: AMD ROCm runtime (x86_64, gfx1200 / RX 9060 XT)
 # ============================================================
 # AMD's validated image supplies a mutually-compatible ROCm 10 + Python 3.11
-# + PyTorch 2.11 stack. CTranslate2's PyPI wheel is CUDA-only, so build the
-# same pinned 4.8.0 release with HIP support for Faster-Whisper.
+# + PyTorch 2.11 stack. We install openai-whisper for PyTorch ROCm GPU execution
+# and the stable ctranslate2 wheel for CPU fallback.
 FROM rocm/pytorch:rocm10.0_ubuntu24.04_py3.11_pytorch_release_2.11.0 AS runtime-amd
 
 USER root
@@ -104,32 +104,8 @@ RUN pip install --no-cache-dir \
       "rocm[devel]==10.0.0" && \
     rocm-sdk init --quiet
 
-ARG CTRANSLATE2_VERSION=4.8.0
-RUN git clone --depth 1 --recurse-submodules --shallow-submodules \
-      --branch "v${CTRANSLATE2_VERSION}" \
-      https://github.com/OpenNMT/CTranslate2.git /tmp/CTranslate2 && \
-    cmake -S /tmp/CTranslate2 -B /tmp/CTranslate2/build \
-      -DCMAKE_BUILD_TYPE=Release \
-      -DCMAKE_INSTALL_PREFIX=/usr/local \
-      -DCMAKE_C_COMPILER=${ROCM_PATH}/llvm/bin/clang \
-      -DCMAKE_CXX_COMPILER=${ROCM_PATH}/llvm/bin/clang++ \
-      -DCMAKE_HIP_COMPILER=${ROCM_PATH}/llvm/bin/clang++ \
-      -DCMAKE_HIP_ARCHITECTURES=gfx1200 \
-      -DGPU_TARGETS=gfx1200 \
-      -DBUILD_CLI=OFF \
-      -DBUILD_TESTS=OFF \
-      -DOPENMP_RUNTIME=COMP \
-      -DWITH_HIP=ON \
-      -DWITH_MKL=OFF \
-      -DWITH_OPENBLAS=ON && \
-    cmake --build /tmp/CTranslate2/build --parallel "$(nproc)" && \
-    cmake --install /tmp/CTranslate2/build && \
-    ldconfig && \
-    pip install --no-cache-dir -r /tmp/CTranslate2/python/install_requirements.txt && \
-    cd /tmp/CTranslate2/python && \
-    CTRANSLATE2_ROOT=/usr/local python setup.py bdist_wheel && \
-    pip install --no-cache-dir --force-reinstall --no-deps dist/*.whl && \
-    cd / && rm -rf /tmp/CTranslate2
+# Install official stable CTranslate2 wheel (for CPU fallback) and openai-whisper (native PyTorch ROCm)
+RUN pip install --no-cache-dir "ctranslate2>=4.8.2" "openai-whisper>=20231117"
 
 # ============================================================
 # Stage 2c: CPU runtime (multi-arch: amd64, arm64, Apple Silicon)

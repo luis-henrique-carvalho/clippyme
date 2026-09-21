@@ -67,6 +67,7 @@ from clippyme.pipeline.hardware import (  # noqa: E402
     DEVICE,
     CUDA_AVAILABLE,
     GPU_VRAM_GB,
+    WHISPER_DEVICE,
     WHISPER_MODEL,
 )
 
@@ -88,24 +89,6 @@ from clippyme.pipeline.gemini_request import (  # noqa: E402,F401
 # YOLO is lazy-loaded on first use. Keeping the model at import time
 # forced every entry-point (including --reframe-only, which never calls
 # detect_person_yolo) to pay the load + GPU transfer cost on startup.
-
-
-
-
-# Whisper models are expensive to construct (weights load + device placement),
-# so cache one per (model, device, compute_type) for the life of the process.
-# Batch jobs re-using the same config reuse the loaded model instead of paying
-# the init cost on every clip.
-_whisper_models: dict = {}
-
-
-def _get_whisper_model(model_name, device, compute_type):
-    """Lazy-load + cache a faster-whisper model keyed by its config."""
-    from faster_whisper import WhisperModel
-    key = (model_name, device, compute_type)
-    if key not in _whisper_models:
-        _whisper_models[key] = WhisperModel(model_name, device=device, compute_type=compute_type)
-    return _whisper_models[key]
 
 # --- MediaPipe Setup ---
 # Use standard Face Detection (BlazeFace) for speed
@@ -239,21 +222,13 @@ from clippyme.pipeline.diarization import (  # noqa: E402
 )
 
 
-def transcribe_video(video_path):
-    """Dispatch to the configured transcription provider.
+def transcribe_video(video_path: str, ai_model: str | None = None):
+    """Transcribe a video using the configured provider.
 
-    Provider is selected via the ``TRANSCRIPTION_PROVIDER`` env var:
-      - "deepgram" (default) → Deepgram Nova-3 REST API (requires DEEPGRAM_API_KEY)
-      - "elevenlabs" → ElevenLabs Scribe REST API (requires ELEVENLABS_API_KEY)
-      - anything else / "whisper" → local Faster-Whisper
-
-    On any cloud-provider failure we automatically fall back to Faster-Whisper
-    so a misconfigured key never breaks the pipeline.
-
-    Whisper path: after transcription, optionally runs pyannote speaker
-    diarization (if ``pyannote.audio`` is installed and a HF token is
-    available) and merges speaker labels into the word timestamps so the
-    downstream Gemini prompt + subtitle writer see the same ``speaker``
+    Returns the standard segment list (with word timestamps if available) plus
+    full_text + detected_lang + detected_prob. Deepgram Scribe audio tags are
+    persisted under ``audio_events`` on the parent response so the Gemini
+    prompt builder can inline them. Faster-Whisper populates the same
     field as the Deepgram path.
     """
     provider = (os.getenv("TRANSCRIPTION_PROVIDER") or "deepgram").strip().lower()
@@ -305,49 +280,34 @@ def transcribe_video(video_path):
                 )
                 print(f"⚠️  ElevenLabs transcription failed ({exc}); falling back to Faster-Whisper.")
 
-        device = "cuda" if CUDA_AVAILABLE else "cpu"
-        compute_type = "float16" if device == "cuda" else "int8"
-        print(f"🎙️  Transcribing with Faster-Whisper [{WHISPER_MODEL}] ({device.upper()} mode)...")
-        model = _get_whisper_model(WHISPER_MODEL, device, compute_type)
+        from clippyme.pipeline.hardware import resolve_whisper_compute
+        device, whisper_model = resolve_whisper_compute(ai_model)
+        compute_type = "float16" if device == "cuda" else "default"
+        print(f"🎙️  Transcribing with Whisper [{whisper_model}] ({device.upper()} mode)...")
         # Honor per-job language override (set by main.py --language → CLIPPYME_LANGUAGE).
-        # 'multi' / '' / unset → let Faster-Whisper auto-detect.
+        # 'multi' / '' / unset → let Whisper auto-detect.
         _lang_override = (os.getenv("CLIPPYME_LANGUAGE") or "").strip().lower()
         _whisper_lang = _lang_override if _lang_override and _lang_override != "multi" else None
         if _whisper_lang:
             print(f"   🌐 Whisper language override: {_whisper_lang}")
-        segments, info = model.transcribe(
-            asr_input, word_timestamps=True, language=_whisper_lang
+
+        from clippyme.pipeline.whisper_transcribe import transcribe_with_whisper
+
+        whisper_res = transcribe_with_whisper(
+            asr_input,
+            model_name=whisper_model,
+            device=device,
+            compute_type=compute_type,
+            language=_whisper_lang,
         )
-        segments = list(segments)
+        transcript_segments = whisper_res.get("segments") or []
+        full_text = whisper_res.get("text") or ""
+        detected_lang = whisper_res.get("language") or "en"
+        detected_prob = whisper_res.get("probability") or 1.0
 
-        print(f"   Detected language '{info.language}' with probability {info.language_probability:.2f}")
-
-        # Convert to openai-whisper compatible format
-        transcript_segments = []
-        full_text = ""
-
-        for segment in segments:
-            # Print progress to keep user informed (and prevent timeouts feeling)
-            print(f"   [{segment.start:.2f}s -> {segment.end:.2f}s] {segment.text}")
-
-            seg_dict = {
-                'text': segment.text,
-                'start': segment.start,
-                'end': segment.end,
-                'words': []
-            }
-
-            if segment.words:
-                for word in segment.words:
-                    seg_dict['words'].append({
-                        'word': word.word,
-                        'start': word.start,
-                        'end': word.end,
-                        'probability': word.probability
-                    })
-
-            transcript_segments.append(seg_dict)
-            full_text += segment.text + " "
+        print(f"   Detected language '{detected_lang}' with probability {detected_prob:.2f}")
+        for seg in transcript_segments:
+            print(f"   [{seg.get('start', 0.0):.2f}s -> {seg.get('end', 0.0):.2f}s] {seg.get('text', '')}")
 
         # --- Optional speaker diarization (pyannote.audio) ------------------
         # Runs only when pyannote is installed AND HF token is set AND
@@ -393,7 +353,7 @@ def transcribe_video(video_path):
         return {
             'text': full_text.strip(),
             'segments': transcript_segments,
-            'language': info.language
+            'language': detected_lang
         }
     finally:
         for _tmp in (_audio_tmp, _iso_tmp):

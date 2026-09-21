@@ -13,6 +13,8 @@ import { ResultsView } from './results';
 import { PublishModal } from './publish';
 import { HistoryView, SettingsView, ApiKeyModal } from './views';
 import { LiveMonitorView } from './live';
+import { ViralStudioView } from './viralStudio';
+import { ViralPublishModal } from './ViralPublishModal';
 import { EditClipModal } from './captions';
 import { optsToPreselections, restoreJob, listBackendJobIds, deleteHistoryJob, cancelJob, pauseJob, resumeJob, stopJob, reframeClip, composeClip } from './realApi';
 import { allPresets, getDefaultPresetOpts, getDefaultPresetId, saveUserPreset, deleteUserPreset, setDefaultPreset } from './presets';
@@ -113,6 +115,7 @@ export default function RedesignApp() {
   const toastTimerIds = useRef([]);
   useEffect(() => () => { toastTimerIds.current.forEach(clearTimeout); }, []);
   const [publishClips, setPublishClips] = useState(null);
+  const [viralPublishItems, setViralPublishItems] = useState(null);
   const [editClip, setEditClip] = useState(null);
   // Multi-select bulk editor: { targets: [{ i, c }] }.
   const [bulkEdit, setBulkEdit] = useState(null);
@@ -458,6 +461,13 @@ export default function RedesignApp() {
           pushToast={pushToast} />
       )}
 
+      {tab === 'viral' && (
+        <ViralStudioView
+          onOpenPublish={(items) => setViralPublishItems(items)}
+          pushToast={pushToast}
+        />
+      )}
+
       {tab === 'live' && <LiveMonitorView pushToast={pushToast} />}
 
       {tab === 'history' && !viewingHistory && (
@@ -486,6 +496,14 @@ export default function RedesignApp() {
           onClose={() => setPublishClips(null)}
           onPublished={(idx) => updateClipStateT(idx, { publishedAt: Date.now() })}
           pushToast={pushToast} />
+      )}
+      {viralPublishItems && (
+        <ViralPublishModal
+          items={viralPublishItems}
+          onClose={() => setViralPublishItems(null)}
+          onPublished={() => setViralPublishItems(null)}
+          pushToast={pushToast}
+        />
       )}
       {editClip && (
         <EditClipModal clip={editClip.clip} idx={editClip.idx} jobId={jobId}

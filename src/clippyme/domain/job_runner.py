@@ -3,7 +3,9 @@ import asyncio
 import glob
 import logging
 import os
+import shutil
 import subprocess
+import sys
 import threading
 
 from clippyme.domain import job_control
@@ -21,6 +23,26 @@ from clippyme.domain.runtime_state import (
 from clippyme.storage.config_store import load_persistent_config
 
 logger = logging.getLogger("clippyme")
+
+
+def normalize_command_executable(cmd: list[str]) -> list[str]:
+    """Ensure the command executable exists in the current environment or fallback safely."""
+    if not cmd:
+        return cmd
+    normalized = list(cmd)
+    first = normalized[0]
+    if ("/" in first or "\\" in first) and not (os.path.exists(first) and os.access(first, os.X_OK)):
+        basename = os.path.basename(first).lower()
+        if "python" in basename:
+            if sys.executable and os.path.exists(sys.executable) and os.access(sys.executable, os.X_OK):
+                normalized[0] = sys.executable
+            else:
+                normalized[0] = shutil.which("python3") or shutil.which("python") or "python"
+        else:
+            resolved = shutil.which(os.path.basename(first))
+            if resolved:
+                normalized[0] = resolved
+    return normalized
 
 
 def merge_persistent_config(env: dict, persisted: dict | None) -> dict:
@@ -60,6 +82,28 @@ def _bounded_max_attempts(job_data: dict, env: dict) -> int:
     except (TypeError, ValueError):
         value = 3
     return min(10, max(1, value))
+
+
+def _sync_viral_studio_failure(job_data: dict, error_msg: str) -> None:
+    """Sync unexpected subprocess failures directly into viral studio store state and logs."""
+    if not isinstance(job_data, dict) or job_data.get("job_type") != "viral_studio":
+        return
+    cmd = job_data.get("cmd", [])
+    item_id = None
+    if isinstance(cmd, list) and "--item-id" in cmd:
+        idx = cmd.index("--item-id")
+        if idx + 1 < len(cmd):
+            item_id = cmd[idx + 1]
+    if item_id:
+        try:
+            from clippyme.domain import viral_studio_orchestrator, viral_studio_store
+
+            item = viral_studio_store.get_item(item_id)
+            if item and item.get("status") not in ("READY_FOR_REVIEW", "APPROVED", "PUBLISHED"):
+                viral_studio_store.update_item(item_id, {"status": "FAILED", "error_message": error_msg})
+                viral_studio_orchestrator.append_item_log(item_id, "ERROR", error_msg, level="error")
+        except Exception:
+            logger.warning("Failed to sync viral studio failure state for item %s", item_id, exc_info=True)
 
 
 def make_run_job(*, jobs: dict, output_root: str, on_change=None):
@@ -115,7 +159,7 @@ def make_run_job(*, jobs: dict, output_root: str, on_change=None):
 
     async def run_job(job_id, job_data):
         """Execute a checkpointed subprocess, retrying transient failures."""
-        cmd = list(job_data["cmd"])
+        cmd = normalize_command_executable(list(job_data["cmd"]))
         env = dict(job_data["env"])
         output_dir = job_data["output_dir"]
         process = None
@@ -233,6 +277,11 @@ def make_run_job(*, jobs: dict, output_root: str, on_change=None):
                 if returncode == 0:
                     jobs[job_id]["status"] = "completed"
                     jobs[job_id]["logs"].append("Process finished successfully.")
+                    # Viral Studio items are durable jobs too, but their
+                    # result lives in the Viral Studio store rather than the
+                    # traditional *_metadata.json pipeline artifact.
+                    if job_data.get("job_type") == "viral_studio":
+                        break
                     if not glob.glob(os.path.join(output_dir, "*_metadata.json")):
                         await asyncio.to_thread(
                             relocate_root_job_artifacts,
@@ -249,7 +298,9 @@ def make_run_job(*, jobs: dict, output_root: str, on_change=None):
                         jobs[job_id]["result"] = final
                     else:
                         jobs[job_id]["status"] = "failed"
-                        jobs[job_id]["logs"].append("No metadata file generated.")
+                        err_msg = "No metadata file generated."
+                        jobs[job_id]["logs"].append(err_msg)
+                        _sync_viral_studio_failure(jobs[job_id], err_msg)
                     break
 
                 # Exit 2 is deterministic validation/preflight rejection.
@@ -272,9 +323,9 @@ def make_run_job(*, jobs: dict, output_root: str, on_change=None):
                     if returncode == 2
                     else "retry limit reached"
                 )
-                jobs[job_id]["logs"].append(
-                    f"Process failed with exit code {returncode} ({reason})."
-                )
+                err_msg = f"Process failed with exit code {returncode} ({reason})."
+                jobs[job_id]["logs"].append(err_msg)
+                _sync_viral_studio_failure(jobs[job_id], err_msg)
                 break
 
         except asyncio.CancelledError:
@@ -282,13 +333,17 @@ def make_run_job(*, jobs: dict, output_root: str, on_change=None):
             job = jobs.get(job_id)
             if job and job.get("status") not in job_control.TERMINAL_STATES:
                 job["status"] = "failed"
-                job["logs"].append("Job interrupted by server shutdown.")
+                err_msg = "Job interrupted by server shutdown."
+                job["logs"].append(err_msg)
+                _sync_viral_studio_failure(job, err_msg)
             raise
         except Exception as exc:
             job = jobs.get(job_id)
             if job is not None:
                 job["status"] = "failed"
-                job["logs"].append(f"Execution error: {exc}")
+                err_msg = f"Execution error: {exc}"
+                job["logs"].append(err_msg)
+                _sync_viral_studio_failure(job, err_msg)
             logger.exception("run_job failed for job_id=%s", job_id)
             await _stop_process_tree(job_id, process or (job or {}).get("process"))
         finally:

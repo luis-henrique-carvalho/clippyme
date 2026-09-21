@@ -21,7 +21,7 @@ logger = logging.getLogger("clippyme")
 
 
 async def publish_clip_flow(*, job_id: str, clip_index: int,
-                            resolved: ResolvedClip, req: dict,
+                            resolved: ResolvedClip | None, req: dict,
                             zernio_cfg: dict) -> dict:
     """Compose (optionally) and upload one clip to Zernio.
 
@@ -34,10 +34,20 @@ async def publish_clip_flow(*, job_id: str, clip_index: int,
         raise ValidationError("Zernio API key not configured")
 
     from clippyme.domain.clip_resolve import composed_clip_basename
-    job_dir = resolved.job_dir
-    base_clip = resolved.clip_path
-    upload_path = base_clip
-    composed_path = os.path.join(job_dir, composed_clip_basename(resolved.clip_info, clip_index))
+    # Viral Studio owns a rendered MP4, not a traditional job metadata file.
+    # It still shares this upload/error-handling flow by supplying clip_path.
+    if resolved is None:
+        upload_path = req.get("clip_path")
+        if not upload_path:
+            raise ValidationError("clip_path is required when no resolved clip is provided")
+        job_dir = None
+        base_clip = upload_path
+        composed_path = None
+    else:
+        job_dir = resolved.job_dir
+        base_clip = resolved.clip_path
+        upload_path = base_clip
+        composed_path = os.path.join(job_dir, composed_clip_basename(resolved.clip_info, clip_index))
 
     toggles = req.get("toggles")
     logger.info(
@@ -48,7 +58,7 @@ async def publish_clip_flow(*, job_id: str, clip_index: int,
         bool(req.get("subtitle_params")),
     )
 
-    if req.get("compose_first") and toggles:
+    if resolved is not None and req.get("compose_first") and toggles:
         try:
             composed_filename = await compose_layers(
                 base_clip=base_clip,
@@ -70,7 +80,7 @@ async def publish_clip_flow(*, job_id: str, clip_index: int,
         except Exception as e:
             logger.error("publish: compose_layers failed for %s/%d: %s", job_id, clip_index, e)
             raise ClippyMeError(f"Compose before publish failed: {e}", status_code=500)
-    elif os.path.exists(composed_path):
+    elif composed_path and os.path.exists(composed_path):
         upload_path = composed_path
 
     if not os.path.exists(upload_path):
@@ -83,7 +93,9 @@ async def publish_clip_flow(*, job_id: str, clip_index: int,
             publish_clip,
             api_key=api_key,
             clip_path=upload_path,
-            title=req.get("title") or resolved.clip_info.get("title", "")[:100] or f"Clip {clip_index + 1}",
+            title=req.get("title") or (
+                resolved.clip_info.get("title", "")[:100] if resolved else ""
+            ) or f"Clip {clip_index + 1}",
             caption=req.get("caption") or "",
             platform_targets=req.get("platforms"),
             schedule_mode=req.get("schedule_mode"),
@@ -112,6 +124,9 @@ async def publish_clip_flow(*, job_id: str, clip_index: int,
     except Exception:
         logger.exception("publish: unexpected error")
         raise ClippyMeError("Publish failed", status_code=500)
+
+    if resolved is None:
+        return {"success": True, **result}
 
     # Best-effort: the publish already succeeded, so a metadata-write hiccup
     # here must not fail the response — just leave the history badge stale.

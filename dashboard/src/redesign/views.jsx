@@ -2,10 +2,11 @@
 // real backend (history list/restore/delete; config keys, cookies, Zernio).
 import { useState, useEffect, useRef } from 'react';
 import { useModalA11y } from './useModalA11y';
-import { Icon, Btn, Badge, Switch, Segmented, Panel } from './primitives';
+import { Icon, Social, Btn, Badge, Switch, Segmented, Panel } from './primitives';
 import { Hero } from './chrome';
 import {
-  getConfig, saveConfig, getModels, cookiesStatus, uploadCookies, deleteCookies,
+  getConfig, saveConfig, getModels, getLocalAIModels, cookiesStatus,
+  uploadPlatformCookies, deletePlatformCookies,
   getZernio, saveZernio, discoverZernioAccounts,
   listFonts, uploadFont, deleteFont, logoStatus, uploadLogo, deleteLogo,
 } from './realApi';
@@ -131,13 +132,28 @@ export function SettingsView({ apiKey, onApiKey, cookiesConfigured, onCookiesCha
   const [zernio, setZernioState] = useState(null);
   const [zKey, setZKey] = useState('');
   const [accts, setAccts] = useState({ tiktok: '', instagram: '', youtube: '' });
-  const [cookies, setCookies] = useState(!!cookiesConfigured);
+  const [cookies, setCookies] = useState(typeof cookiesConfigured === 'object' && cookiesConfigured !== null ? cookiesConfigured : { configured: !!cookiesConfigured });
   const [logoOn, setLogoOn] = useState(false);
   const [fonts, setFonts] = useState([]);
   const [provider, setProvider] = useState('deepgram');
   const [model, setModel] = useState('');
+  const [defaultAIModel, setDefaultAIModel] = useState('');
   const [models, setModels] = useState(FALLBACK_MODELS);
   const [loadingModels, setLoadingModels] = useState(false);
+  const [localAI, setLocalAI] = useState({
+    lm_studio: { online: false, base_url: '', models: [] },
+    ollama: { online: false, base_url: '', models: [] },
+  });
+  const [loadingLocalAI, setLoadingLocalAI] = useState(false);
+
+  const loadLocalAI = async () => {
+    setLoadingLocalAI(true);
+    try {
+      const data = await getLocalAIModels();
+      if (data) setLocalAI(data);
+    } catch { /* silent */ }
+    finally { setLoadingLocalAI(false); }
+  };
 
   // Pull the live model list from the backend (uses the saved key if the
   // header is empty). Merges discovery with the curated fallback + the
@@ -169,12 +185,14 @@ export function SettingsView({ apiKey, onApiKey, cookiesConfigured, onCookiesCha
     });
     if (c.TRANSCRIPTION_PROVIDER) setProvider(c.TRANSCRIPTION_PROVIDER);
     if (c.GEMINI_MODEL) setModel(c.GEMINI_MODEL);
+    if (c.DEFAULT_AI_MODEL !== undefined) setDefaultAIModel(c.DEFAULT_AI_MODEL || '');
   };
 
   useEffect(() => {
     refreshConfig().then(loadModels);
+    loadLocalAI();
     getZernio().then((z) => { setZernioState(z); if (z.accounts) setAccts({ tiktok: '', instagram: '', youtube: '', ...z.accounts }); }).catch(() => {});
-    cookiesStatus().then((s) => setCookies(!!s.configured)).catch(() => {});
+    cookiesStatus().then((s) => setCookies(s || {})).catch(() => {});
     logoStatus().then((s) => setLogoOn(!!s.configured)).catch(() => {});
     listFonts().then(({ fonts: f }) => setFonts(Array.isArray(f) ? f : [])).catch(() => {});
     // Mount-once bootstrap; loadModels reads the latest key via closure on call.
@@ -215,15 +233,30 @@ export function SettingsView({ apiKey, onApiKey, cookiesConfigured, onCookiesCha
     } catch { pushToast?.('error', 'Discover failed. Check the API key.'); }
   };
 
-  const onCookieFile = async (e) => {
+  const onPlatformCookieFile = async (platform, e) => {
     const f = e.target.files?.[0];
     if (!f) return;
-    try { await uploadCookies(f); setCookies(true); onCookiesChange?.(true); pushToast?.('success', 'Cookies uploaded'); }
-    catch { pushToast?.('error', 'Cookie upload failed'); }
+    try {
+      await uploadPlatformCookies(platform, f);
+      const s = await cookiesStatus();
+      setCookies(s || {});
+      onCookiesChange?.(!!s?.configured);
+      pushToast?.('success', `${platform.charAt(0).toUpperCase() + platform.slice(1)} cookies uploaded`);
+    } catch {
+      pushToast?.('error', `Cookie upload for ${platform} failed`);
+    }
   };
-  const removeCookies = async () => {
-    try { await deleteCookies(); setCookies(false); onCookiesChange?.(false); pushToast?.('info', 'Cookies removed'); }
-    catch { pushToast?.('error', 'Remove failed'); }
+
+  const removePlatformCookies = async (platform) => {
+    try {
+      await deletePlatformCookies(platform);
+      const s = await cookiesStatus();
+      setCookies(s || {});
+      onCookiesChange?.(!!s?.configured);
+      pushToast?.('info', `${platform.charAt(0).toUpperCase() + platform.slice(1)} cookies removed`);
+    } catch {
+      pushToast?.('error', `Remove ${platform} cookies failed`);
+    }
   };
 
   const onLogoFile = async (e) => {
@@ -288,7 +321,7 @@ export function SettingsView({ apiKey, onApiKey, cookiesConfigured, onCookiesCha
         {provider === 'elevenlabs' && !present.elevenlabs && (
           <div className="od" style={{ color: 'var(--warn, #f5a623)', padding: '0 0 8px 44px' }}>⚠ No ElevenLabs key saved — pipeline will use local Whisper.</div>
         )}
-        <div className="opt" style={{ borderBottom: 0 }}>
+        <div className="opt">
           <div className="oico"><Icon n="sparkles" /></div>
           <div className="otxt"><div className="ot">Gemini model</div><div className="od">Viral-moment detection model · applied to new jobs</div></div>
           <div className="r" style={{ gap: 8 }}>
@@ -302,6 +335,106 @@ export function SettingsView({ apiKey, onApiKey, cookiesConfigured, onCookiesCha
             <Btn variant="ghost" size="sm" icon="refresh-cw" onClick={() => loadModels()} disabled={loadingModels}>
               {loadingModels ? '…' : 'Refresh'}
             </Btn>
+          </div>
+        </div>
+
+        <div className="opt">
+          <div className="oico"><Icon n="bot" /></div>
+          <div className="otxt"><div className="ot">Modelo de IA Padrão</div><div className="od">Modelo padrão para todo o sistema (Viral Studio, cópias e análises)</div></div>
+          <div className="r" style={{ gap: 8 }}>
+            <select
+              className="key-input"
+              style={{ width: 'auto', minWidth: 220, fontFamily: 'var(--font-sans)' }}
+              value={defaultAIModel}
+              onChange={(e) => {
+                setDefaultAIModel(e.target.value);
+                saveKeys({ DEFAULT_AI_MODEL: e.target.value });
+              }}
+            >
+              <option value="">Padrão (Automático / Gemini 3.5 Flash)</option>
+
+              {/* LM Studio Conectado */}
+              {localAI?.lm_studio?.online && localAI.lm_studio.models?.length > 0 && (
+                <optgroup label={`🟢 LM Studio Conectado (${localAI.lm_studio.models.length})`}>
+                  {localAI.lm_studio.models.map((m) => (
+                    <option key={`lmstudio:${m.id}`} value={`lmstudio:${m.id}`}>
+                      {m.name} (LM Studio Local ⚡)
+                    </option>
+                  ))}
+                </optgroup>
+              )}
+
+              {/* Ollama Conectado */}
+              {localAI?.ollama?.online && localAI.ollama.models?.length > 0 && (
+                <optgroup label={`🟢 Ollama Conectado (${localAI.ollama.models.length})`}>
+                  {localAI.ollama.models.map((m) => (
+                    <option key={`ollama:${m.id || m.name}`} value={`ollama:${m.id || m.name}`}>
+                      {m.name} (Ollama Local ⚡)
+                    </option>
+                  ))}
+                </optgroup>
+              )}
+
+              {/* Gemini Models */}
+              <optgroup label="Google Gemini (Nuvem)">
+                {models.map((m) => (
+                  <option key={m.name} value={`gemini:${m.name}`}>
+                    {m.display_name || m.name}
+                  </option>
+                ))}
+              </optgroup>
+            </select>
+          </div>
+        </div>
+
+        <div className="opt" style={{ borderBottom: 0, flexDirection: 'column', alignItems: 'stretch', gap: 10 }}>
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+              <div className="oico"><Icon n="cpu" /></div>
+              <div className="otxt">
+                <div className="ot">Servidores de IA Local</div>
+                <div className="od">Descoberta automática de modelos locais (LM Studio & Ollama) para geração gratuita</div>
+              </div>
+            </div>
+            <Btn variant="ghost" size="sm" icon="refresh-cw" onClick={() => loadLocalAI()} disabled={loadingLocalAI}>
+              {loadingLocalAI ? '…' : 'Sondar Servidores'}
+            </Btn>
+          </div>
+
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(240px, 1fr))', gap: 10, marginTop: 4 }}>
+            {/* LM Studio Card */}
+            <div style={{ background: 'var(--bg-3)', border: '1px solid var(--line-1)', borderRadius: 'var(--r-md)', padding: '12px 14px', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+              <div>
+                <div style={{ fontWeight: 600, fontSize: 'var(--text-sm)', color: 'var(--fg-1)' }}>LM Studio</div>
+                <div style={{ fontSize: 'var(--text-2xs)', color: 'var(--fg-3)', fontFamily: 'var(--font-mono)' }}>:1234/v1</div>
+              </div>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                {localAI?.lm_studio?.online ? (
+                  <Badge tone="teal" icon="check">
+                    Conectado ({localAI.lm_studio.models?.length || 0} {localAI.lm_studio.models?.length === 1 ? 'modelo' : 'modelos'})
+                  </Badge>
+                ) : (
+                  <Badge tone="out">Desconectado</Badge>
+                )}
+              </div>
+            </div>
+
+            {/* Ollama Card */}
+            <div style={{ background: 'var(--bg-3)', border: '1px solid var(--line-1)', borderRadius: 'var(--r-md)', padding: '12px 14px', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+              <div>
+                <div style={{ fontWeight: 600, fontSize: 'var(--text-sm)', color: 'var(--fg-1)' }}>Ollama</div>
+                <div style={{ fontSize: 'var(--text-2xs)', color: 'var(--fg-3)', fontFamily: 'var(--font-mono)' }}>:11434/api</div>
+              </div>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                {localAI?.ollama?.online ? (
+                  <Badge tone="teal" icon="check">
+                    Conectado ({localAI.ollama.models?.length || 0} {localAI.ollama.models?.length === 1 ? 'modelo' : 'modelos'})
+                  </Badge>
+                ) : (
+                  <Badge tone="out">Desconectado</Badge>
+                )}
+              </div>
+            </div>
           </div>
         </div>
       </Panel>
@@ -370,18 +503,43 @@ export function SettingsView({ apiKey, onApiKey, cookiesConfigured, onCookiesCha
         </div>
       </Panel>
 
-      <Panel title="Downloads" sub="For age- or region-restricted sources" icon="cookie">
-        <div className="opt" style={{ borderBottom: 0 }}>
-          <div className="oico"><Icon n="cookie" /></div>
-          <div className="otxt"><div className="ot">YouTube cookies</div><div className="od">{cookies ? 'Configured · restricted videos OK' : 'Not set · public videos only'}</div></div>
-          <div className="r" style={{ gap: 8 }}>
-            <label className="btn btn-secondary btn-sm" style={{ cursor: 'pointer' }}>
-              <Icon n="upload" />Upload
-              <input type="file" accept=".txt" hidden onChange={onCookieFile} />
-            </label>
-            {cookies && <Btn variant="ghost" size="sm" icon="trash-2" onClick={removeCookies}>Remove</Btn>}
-          </div>
-        </div>
+      <Panel title="Downloads & Cookies" sub="Platform-specific session cookies for age-restricted or bot-protected sources" icon="cookie">
+        {[
+          { id: 'youtube', label: 'YouTube cookies', file: 'youtube.txt' },
+          { id: 'instagram', label: 'Instagram cookies', file: 'instagram.txt' },
+          { id: 'tiktok', label: 'TikTok cookies', file: 'tiktok.txt' },
+        ].map((plat, idx, arr) => {
+          const isConfigured = !!cookies[plat.id] || (plat.id === 'youtube' && !!cookies.legacy);
+          return (
+            <div key={plat.id} className="opt" style={idx === arr.length - 1 ? { borderBottom: 0 } : {}}>
+              <div className="oico" style={{ display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+                <Social n={plat.id} size={18} />
+              </div>
+              <div className="otxt">
+                <div className="ot" style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                  <span>{plat.label}</span>
+                  <Badge tone={isConfigured ? 'teal' : 'out'}>
+                    {isConfigured ? 'Configurado' : 'Não configurado'}
+                  </Badge>
+                </div>
+                <div className="od">
+                  {isConfigured ? `Configured (data/cookies/${plat.file}) · restricted & viral media OK` : `Not set (data/cookies/${plat.file}) · public videos only`}
+                </div>
+              </div>
+              <div className="r" style={{ gap: 8 }}>
+                <label className="btn btn-secondary btn-sm" style={{ cursor: 'pointer' }} aria-label={`Upload ${plat.label}`}>
+                  <Icon n="upload" />Upload
+                  <input type="file" accept=".txt" hidden onChange={(e) => onPlatformCookieFile(plat.id, e)} />
+                </label>
+                {isConfigured && (
+                  <Btn variant="ghost" size="sm" icon="trash-2" onClick={() => removePlatformCookies(plat.id)} aria-label={`Remove ${plat.label}`}>
+                    Remove
+                  </Btn>
+                )}
+              </div>
+            </div>
+          );
+        })}
       </Panel>
     </div>
   );

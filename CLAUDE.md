@@ -65,6 +65,11 @@ Python backend is src-layout under `src/clippyme/` (`pip install -e .`):
   consumers pass `original_index`),
   `grade.py`, `clip_qa.py`, `clip_edit_ai.py`, `history_service.py`,
   `encode.py` (single source of x264 settings for every render pass),
+  `viral_studio_context.py` (multi-signal context extraction: keyframes, audio transcript, metadata & engagement),
+  `viral_studio_copy.py` (multimodal copy generation with Gemini fallback, inline JPEG parts, full token/cost telemetry),
+  `viral_studio_download.py` (yt-dlp intake preserving source provenance, manifest, and engagement metrics),
+  `viral_studio_orchestrator.py` (step logging `append_item_log` and batch lifecycle orchestration),
+  `viral_studio_store.py` (atomic crash-safe JSON store with `_STORE_LOCK` and 0o600 permissions),
   `errors.py` (domain exceptions mapped to HTTP by one app-level handler).
 - `pipeline/` — `orchestrator.py` (**the entrypoint queued jobs actually run**:
   preflight → checkpointed `main.py` stages → per-render output QA; owns
@@ -123,8 +128,9 @@ rendered).
 ## Commands
 
 ```bash
-docker compose up --build            # primary run (backend :8000, frontend :5175)
-docker compose -f docker-compose.yml -f docker-compose.amd.yml up --build  # AMD ROCm (gfx1200)
+docker compose up --build            # primary run (backend :8000, frontend :5175, CPU)
+docker compose -f docker-compose.yml -f docker-compose.amd.yml up --build  # AMD ROCm GPU (gfx1200 / RDNA)
+docker compose -f docker-compose.yml -f docker-compose.gpu.yml up --build  # NVIDIA CUDA GPU
 docker compose -f docker-compose.yml -f docker-compose.prod.yml up --build  # prod frontend (nginx)
 
 # Backend host tests (fast, no CV stack) + lint
@@ -187,11 +193,18 @@ as `clip_filename` in metadata (re-dumped atomically per cut iteration) and
 every consumer resolves through `clip_resolve.clip_filename_for`
 (clip_filename → video_url → positional legacy fallback).
 
-**Transcription**: `TRANSCRIPTION_PROVIDER` = `deepgram` (default, Nova-3
+**Transcription & Hardware Acceleration**: `TRANSCRIPTION_PROVIDER` = `deepgram` (default, Nova-3
 REST) | `elevenlabs` (Scribe; audio-event tags feed the Gemini prompt) |
-`whisper` (local). Both cloud providers silently fall back to Faster-Whisper
-on any failure. All paths transcribe an extracted mono-16kHz FLAC, not the
-video. Transcripts are cached 7 days under `data/cache/` keyed by URL hash.
+`whisper` (local). Both cloud providers silently fall back to Whisper on any
+failure. All paths transcribe an extracted mono-16kHz FLAC, not the video.
+Transcripts are cached 7 days under `data/cache/` keyed by URL hash.
+- **Compute Architecture & Dynamic Routing**:
+  - **Whisper Speech-to-Text**: Managed dynamically by `resolve_whisper_compute(ai_model)`.
+    - When using **Cloud AI APIs** (Gemini, Claude, OpenAI): Whisper automatically runs on **GPU (`cuda`)** (PyTorch ROCm `openai-whisper` on AMD or `faster-whisper` on NVIDIA) scaled by VRAM ($\ge$12GB: `large-v3`, $\ge$6GB: `medium`, <6GB: `small`).
+    - When using **Local LLMs** (LM Studio, Ollama): Whisper runs on **CPU (`cpu`)** to avoid VRAM exhaustion and GPU contention, scaled by system RAM ($\ge$16GB: `medium`, $\ge$8GB: `small`, <8GB: `base`).
+    - **Fallback**: GPU errors fall back to CPU automatically.
+    - **Overrides**: `WHISPER_DEVICE` and `WHISPER_MODEL` in `.env` override dynamic selection.
+  - **GPU Acceleration (Vision & Render)**: AMD (ROCm / HIP) and NVIDIA (CUDA) remain active for YOLO person/face tracking, PyTorch vision tensors, and video encoding.
 
 **Compose** (`POST /api/compose/{job}/{clip}`): layers render in the order
 **Grade → Subtitles → Smart Cut → Hook → Logo → Banner**. Do NOT reorder —
@@ -268,7 +281,14 @@ through verbatim (the frontend parses per-platform 429 daily limits).
   committed. Pre-commit secret scan: `git config core.hooksPath .githooks`.
   With `TRUST_PROXY=1`, `client_ip` reads the **last** `X-Forwarded-For`
   hop (the shipped nginx APPENDS via `$proxy_add_x_forwarded_for` — the
-  first hop is client-forgeable); keep append+last-hop in sync.
+- **Viral Content Studio Rules**:
+  * `viral_studio_context.py`: Extract multi-signal context (yt-dlp title/caption/tags, keyframe JPEGs downscaled to ~512px saved under `/videos/viral_studio/<batch>/<item>/keyframes/`, speech transcript, engagement metrics `view_count`, `like_count`, `comment_count`, `repost_count`). `_extract_audio_transcript` must use dynamic import to stay host-testable without cv2/torch.
+  * `viral_studio_copy.py`: Multimodal copy generation supporting Gemini, LM Studio, and Ollama. Passes inline JPEG parts (`types.Part.from_bytes`) + context summary, guaranteeing zero product hallucinations. Persists full LLM telemetry (`model`, `prompt_tokens`, `candidate_tokens`, `estimated_cost_usd`, `latency_ms`, `prompt`, `raw_response`) to `viral_studio_store`. Local inference clients (LM Studio / Ollama) MUST use a >= 300s timeout to accommodate 27B+ reasoning/CoT models.
+  * `job_runner.py` Failure Propagation: Subprocess exits with non-zero returncodes (including SIGSEGV 139 / GPU coredump) MUST sync terminal `FAILED` state to `viral_studio_store` and append structured `ERROR` telemetry so items never stay stuck in `ANALYZING` or `DOWNLOADING`.
+  * **Frontend Observability & Model Resolution**: `ViralEditModal.jsx` provides a dedicated 3-view Observability Hub (`Sinais Extraídos`, `Telemetria da LLM`, `Linha do Tempo`). The telemetry view must resolve `item.model` or `AI_ROUTING` logs directly and display waiting dashes (`—`) for pending metrics rather than hardcoding cloud model fallbacks or zeroed stats. Model selection from `createBatch` must thread through all API/orchestrator layers without drop.
+- **Docker Host UID & Reload Workflow**:
+  * `docker-entrypoint.sh` dynamically synchronizes container `appuser` with the host user's UID/GID (`stat -c '%u' /app`) at boot, ensuring all state files (`0o600`) in `data/` and `output/` belong to the developer on the host machine without permission errors.
+  * Because backend `uvicorn` in Docker runs without `--reload`, **always run `docker restart clippyme-backend`** after modifying backend Python files so the running uvicorn process reloads updated Pydantic schemas and route handlers.
 
 ## API endpoints
 

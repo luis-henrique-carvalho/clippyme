@@ -237,9 +237,33 @@ export async function getModels(apiKey) {
   return res.json();
 }
 
+export async function getLocalAIModels() {
+  const empty = { lm_studio: { online: false, base_url: '', models: [] }, ollama: { online: false, base_url: '', models: [] }, models: [] };
+  try {
+    const res = await apiFetch(getApiUrl('/api/config/local-models'));
+    if (!res.ok) return empty;
+    return await res.json();
+  } catch {
+    return empty;
+  }
+}
+
+export async function regenerateItemCopy(itemId, { model, manual_instructions } = {}) {
+  const res = await apiFetch(getApiUrl(`/api/viral-studio/items/${encodeURIComponent(itemId)}/regenerate-copy`), {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ model, manual_instructions }),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.detail || `HTTP ${res.status}`);
+  }
+  return res.json();
+}
+
 export async function cookiesStatus() {
   const res = await apiFetch(getApiUrl('/api/config/cookies/status'));
-  if (!res.ok) return { configured: false };
+  if (!res.ok) return { configured: false, youtube: false, instagram: false, tiktok: false, legacy: false };
   return res.json();
 }
 
@@ -251,9 +275,23 @@ export async function uploadCookies(file) {
   return res.json().catch(() => ({}));
 }
 
+export async function uploadPlatformCookies(platform, file) {
+  const fd = new FormData();
+  fd.append('cookies_file', file);
+  const res = await apiFetch(getApiUrl(`/api/config/cookies/${platform}`), { method: 'POST', body: fd });
+  if (!res.ok) throw new Error(`${platform} cookie upload failed`);
+  return res.json().catch(() => ({}));
+}
+
 export async function deleteCookies() {
   const res = await apiFetch(getApiUrl('/api/config/cookies'), { method: 'DELETE' });
   if (!res.ok) throw new Error('Cookie remove failed');
+  return res.json().catch(() => ({}));
+}
+
+export async function deletePlatformCookies(platform) {
+  const res = await apiFetch(getApiUrl(`/api/config/cookies/${platform}`), { method: 'DELETE' });
+  if (!res.ok) throw new Error(`${platform} cookie remove failed`);
   return res.json().catch(() => ({}));
 }
 
