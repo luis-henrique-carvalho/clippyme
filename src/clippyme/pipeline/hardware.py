@@ -6,22 +6,28 @@ reframe modules can import without a circular dependency on ``main``.
 """
 import os
 import psutil as _psutil_check
-import torch
+try:
+    import torch
+    DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+    GPU_BACKEND = "ROCm/HIP" if getattr(torch.version, "hip", None) else "CUDA"
+    CUDA_AVAILABLE = bool(torch.cuda.is_available())
+    GPU_VRAM_GB = 0.0
 
-DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
-GPU_BACKEND = "ROCm/HIP" if getattr(torch.version, "hip", None) else "CUDA"
-CUDA_AVAILABLE = bool(torch.cuda.is_available())
-GPU_VRAM_GB = 0.0
-
-if CUDA_AVAILABLE:
-    try:
-        GPU_VRAM_GB = round(torch.cuda.get_device_properties(0).total_memory / (1024**3), 1)
-        print(f"✅ {GPU_BACKEND} GPU detected — {torch.cuda.get_device_name(0)} ({GPU_VRAM_GB}GB VRAM)")
-    except Exception as e:
-        CUDA_AVAILABLE = False
-        print(f"⚠️  {GPU_BACKEND} GPU detection failed: {e} — using CPU")
-else:
-    print(f"ℹ️  No {GPU_BACKEND} GPU detected — using CPU")
+    if CUDA_AVAILABLE:
+        try:
+            GPU_VRAM_GB = round(torch.cuda.get_device_properties(0).total_memory / (1024**3), 1)
+            print(f"✅ {GPU_BACKEND} GPU detected — {torch.cuda.get_device_name(0)} ({GPU_VRAM_GB}GB VRAM)")
+        except Exception as e:
+            CUDA_AVAILABLE = False
+            print(f"⚠️  {GPU_BACKEND} GPU detection failed: {e} — using CPU")
+    else:
+        print(f"ℹ️  No {GPU_BACKEND} GPU detected — using CPU")
+except ImportError:
+    DEVICE = "cpu"
+    GPU_BACKEND = "CPU"
+    CUDA_AVAILABLE = False
+    GPU_VRAM_GB = 0.0
+    print("ℹ️  PyTorch not installed — using CPU defaults")
 
 # Whisper device: defaults to CPU to leave 100% of GPU VRAM for LLM & vision workloads
 WHISPER_DEVICE = os.getenv("WHISPER_DEVICE", "cpu").strip().lower()

@@ -1265,6 +1265,33 @@ def test_parse_model_identifier_tagged_and_prefixed():
     assert viral_studio_copy.parse_model_identifier(None) == ("gemini", "")
 
 
+def test_build_affiliate_copy_prompt_default_url_fallback():
+    """Verify build_affiliate_copy_prompt falls back to brand default_affiliate_url when product_url is omitted or empty."""
+    brand = {
+        "name": "Test Brand",
+        "handle": "@testbrand",
+        "default_affiliate_url": "https://brand.com/shop",
+    }
+    prompt_with_item_url = viral_studio_copy.build_affiliate_copy_prompt(
+        brand=brand,
+        product_url="https://product.com/item123",
+    )
+    assert "https://product.com/item123" in prompt_with_item_url
+    assert "https://brand.com/shop" not in prompt_with_item_url
+
+    prompt_with_fallback = viral_studio_copy.build_affiliate_copy_prompt(
+        brand=brand,
+        product_url="",
+    )
+    assert "https://brand.com/shop" in prompt_with_fallback
+
+    prompt_with_none = viral_studio_copy.build_affiliate_copy_prompt(
+        brand=brand,
+        product_url=None,
+    )
+    assert "https://brand.com/shop" in prompt_with_none
+
+
 
 
 

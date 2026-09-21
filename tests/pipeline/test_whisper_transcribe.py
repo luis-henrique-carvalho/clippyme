@@ -18,7 +18,7 @@ def test_hardware_constants_defined():
     assert hasattr(hardware, "CUDA_AVAILABLE")
     assert isinstance(hardware.CUDA_AVAILABLE, bool)
     assert hasattr(hardware, "GPU_BACKEND")
-    assert hardware.GPU_BACKEND in ("ROCm/HIP", "CUDA")
+    assert hardware.GPU_BACKEND in ("ROCm/HIP", "CUDA", "CPU")
     assert hasattr(hardware, "WHISPER_DEVICE")
     assert hardware.WHISPER_DEVICE in ("cuda", "cpu")
     assert hasattr(hardware, "WHISPER_MODEL")
@@ -54,8 +54,10 @@ def test_openai_whisper_formatting(monkeypatch):
 
     mock_whisper = MagicMock()
     mock_whisper.load_model.return_value = mock_model
+    mock_torch = MagicMock()
+    mock_torch.cuda.is_available.return_value = False
 
-    with patch.dict("sys.modules", {"whisper": mock_whisper}):
+    with patch.dict("sys.modules", {"whisper": mock_whisper, "torch": mock_torch}):
         res = wt._transcribe_openai_whisper("dummy.wav", model_name="tiny", device="cpu")
 
     assert res["text"] == "hello world"
@@ -126,8 +128,10 @@ def test_openai_whisper_synthesizes_words_if_empty(monkeypatch):
     }
     mock_whisper = MagicMock()
     mock_whisper.load_model.return_value = mock_model
+    mock_torch = MagicMock()
+    mock_torch.cuda.is_available.return_value = False
 
-    with patch.dict("sys.modules", {"whisper": mock_whisper}):
+    with patch.dict("sys.modules", {"whisper": mock_whisper, "torch": mock_torch}):
         res = wt._transcribe_openai_whisper("dummy.wav", model_name="tiny", device="cpu")
 
     assert len(res["segments"]) == 1

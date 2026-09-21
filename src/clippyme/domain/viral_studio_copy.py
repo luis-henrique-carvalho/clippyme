@@ -13,6 +13,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import re
 import time
 from typing import Any, Dict, List, Optional, Union
@@ -543,7 +544,10 @@ def build_affiliate_copy_prompt(
     )
 
     product_code_str = str(product_code).strip() if product_code else ""
+    default_affiliate_url = _extract_field(brand, "default_affiliate_url", "")
+    default_affiliate_url_str = str(default_affiliate_url).strip() if default_affiliate_url else ""
     product_url_str = str(product_url).strip() if product_url else ""
+    effective_url_str = product_url_str or default_affiliate_url_str
     instructions_str = str(manual_instructions).strip() if manual_instructions else ""
 
     code_instruction = ""
@@ -555,8 +559,8 @@ def build_affiliate_copy_prompt(
         )
 
     url_instruction = ""
-    if product_url_str:
-        url_instruction = f"- Link / URL de referência do produto: {product_url_str}\n"
+    if effective_url_str:
+        url_instruction = f"- Link / URL de referência do produto: {effective_url_str}\n"
 
     user_instructions = ""
     if instructions_str:
