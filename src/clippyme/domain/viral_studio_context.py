@@ -179,7 +179,7 @@ def _extract_frame_jpeg(video_path: str, timestamp: float, max_dimension: int = 
     return None
 
 
-def _extract_audio_transcript(video_path: str) -> str:
+def _extract_audio_transcript(video_path: str, ai_model: Optional[str] = None) -> str:
     """Transcribe video audio using ClippyMe transcription pipeline."""
     try:
         import importlib
@@ -187,7 +187,10 @@ def _extract_audio_transcript(video_path: str) -> str:
         main_mod = importlib.import_module("clippyme.pipeline.main")
         transcribe_fn = getattr(main_mod, "transcribe_video", None)
         if transcribe_fn:
-            transcript_data = transcribe_fn(video_path)
+            try:
+                transcript_data = transcribe_fn(video_path, ai_model=ai_model)
+            except TypeError:
+                transcript_data = transcribe_fn(video_path)
             if isinstance(transcript_data, list):
                 lines = []
                 for item in transcript_data:
@@ -221,6 +224,7 @@ def extract_viral_context(
     keyframes_dir: Optional[str] = None,
     batch_id: Optional[str] = None,
     item_id: Optional[str] = None,
+    ai_model: Optional[str] = None,
 ) -> VideoContext:
     """Extract complete multi-signal context from a video file."""
     if not video_path or not os.path.isfile(video_path):
@@ -283,7 +287,7 @@ def extract_viral_context(
                     logger.debug("Could not write keyframe file %s: %s", kf_path, exc)
 
     # Extract speech / audio transcript
-    transcript = _extract_audio_transcript(video_path)
+    transcript = _extract_audio_transcript(video_path, ai_model=ai_model)
 
     return VideoContext(
         keyframes=keyframes,

@@ -20,17 +20,16 @@ def _strip_ass_braces(text: str) -> str:
     return (text or "").replace('{', '').replace('}', '')
 
 
-def transcribe_audio(video_path):
+def transcribe_audio(video_path, ai_model=None):
     """
     Transcribe audio from a video file using Whisper.
     Returns transcript in the same format as main.py for compatibility.
     """
-    from clippyme.pipeline.hardware import WHISPER_DEVICE, WHISPER_MODEL
+    from clippyme.pipeline.hardware import resolve_whisper_compute
     from clippyme.pipeline.whisper_transcribe import transcribe_with_whisper
 
-    device = WHISPER_DEVICE
+    device, whisper_model = resolve_whisper_compute(ai_model)
     compute_type = "float16" if device == "cuda" else "default"
-    whisper_model = WHISPER_MODEL
     logger.info("🎙️  Transcribing audio [%s] from: %s (%s mode)", whisper_model, video_path, device.upper())
 
     res = transcribe_with_whisper(video_path, model_name=whisper_model, device=device, compute_type=compute_type)

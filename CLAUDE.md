@@ -198,13 +198,13 @@ REST) | `elevenlabs` (Scribe; audio-event tags feed the Gemini prompt) |
 `whisper` (local). Both cloud providers silently fall back to Whisper on any
 failure. All paths transcribe an extracted mono-16kHz FLAC, not the video.
 Transcripts are cached 7 days under `data/cache/` keyed by URL hash.
-- **Compute Architecture**:
-  - **Whisper Speech-to-Text**: Defaults to CPU execution (`WHISPER_DEVICE="cpu"`) to keep 100% of GPU VRAM dedicated to LM Studio (Gemma) and image/video rendering without any risk of CUDA OOM or system contention. Uses `faster-whisper` with automatic fallback to `openai-whisper`. If `WHISPER_DEVICE="cuda"` is explicitly set, AMD ROCm uses `openai-whisper` (`fp16=True`) and NVIDIA CUDA uses `faster-whisper`.
+- **Compute Architecture & Dynamic Routing**:
+  - **Whisper Speech-to-Text**: Managed dynamically by `resolve_whisper_compute(ai_model)`.
+    - When using **Cloud AI APIs** (Gemini, Claude, OpenAI): Whisper automatically runs on **GPU (`cuda`)** (PyTorch ROCm `openai-whisper` on AMD or `faster-whisper` on NVIDIA) scaled by VRAM ($\ge$12GB: `large-v3`, $\ge$6GB: `medium`, <6GB: `small`).
+    - When using **Local LLMs** (LM Studio, Ollama): Whisper runs on **CPU (`cpu`)** to avoid VRAM exhaustion and GPU contention, scaled by system RAM ($\ge$16GB: `medium`, $\ge$8GB: `small`, <8GB: `base`).
+    - **Fallback**: GPU errors fall back to CPU automatically.
+    - **Overrides**: `WHISPER_DEVICE` and `WHISPER_MODEL` in `.env` override dynamic selection.
   - **GPU Acceleration (Vision & Render)**: AMD (ROCm / HIP) and NVIDIA (CUDA) remain active for YOLO person/face tracking, PyTorch vision tensors, and video encoding.
-- **Whisper Model Auto-Selection**:
-  - CPU RAM $\ge$ 16 GB: `medium` | $\ge$ 8 GB: `small` | `<` 8 GB: `base`
-  - GPU VRAM (if `WHISPER_DEVICE="cuda"`): $\ge$ 8 GB: `medium` | `<` 8 GB: `small`
-  - Override via `WHISPER_MODEL` and `WHISPER_DEVICE` env vars.
 
 **Compose** (`POST /api/compose/{job}/{clip}`): layers render in the order
 **Grade → Subtitles → Smart Cut → Hook → Logo → Banner**. Do NOT reorder —

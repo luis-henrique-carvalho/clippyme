@@ -222,21 +222,13 @@ from clippyme.pipeline.diarization import (  # noqa: E402
 )
 
 
-def transcribe_video(video_path):
-    """Dispatch to the configured transcription provider.
+def transcribe_video(video_path: str, ai_model: str | None = None):
+    """Transcribe a video using the configured provider.
 
-    Provider is selected via the ``TRANSCRIPTION_PROVIDER`` env var:
-      - "deepgram" (default) → Deepgram Nova-3 REST API (requires DEEPGRAM_API_KEY)
-      - "elevenlabs" → ElevenLabs Scribe REST API (requires ELEVENLABS_API_KEY)
-      - anything else / "whisper" → local Faster-Whisper
-
-    On any cloud-provider failure we automatically fall back to Faster-Whisper
-    so a misconfigured key never breaks the pipeline.
-
-    Whisper path: after transcription, optionally runs pyannote speaker
-    diarization (if ``pyannote.audio`` is installed and a HF token is
-    available) and merges speaker labels into the word timestamps so the
-    downstream Gemini prompt + subtitle writer see the same ``speaker``
+    Returns the standard segment list (with word timestamps if available) plus
+    full_text + detected_lang + detected_prob. Deepgram Scribe audio tags are
+    persisted under ``audio_events`` on the parent response so the Gemini
+    prompt builder can inline them. Faster-Whisper populates the same
     field as the Deepgram path.
     """
     provider = (os.getenv("TRANSCRIPTION_PROVIDER") or "deepgram").strip().lower()
@@ -288,9 +280,10 @@ def transcribe_video(video_path):
                 )
                 print(f"⚠️  ElevenLabs transcription failed ({exc}); falling back to Faster-Whisper.")
 
-        device = WHISPER_DEVICE
+        from clippyme.pipeline.hardware import resolve_whisper_compute
+        device, whisper_model = resolve_whisper_compute(ai_model)
         compute_type = "float16" if device == "cuda" else "default"
-        print(f"🎙️  Transcribing with Whisper [{WHISPER_MODEL}] ({device.upper()} mode)...")
+        print(f"🎙️  Transcribing with Whisper [{whisper_model}] ({device.upper()} mode)...")
         # Honor per-job language override (set by main.py --language → CLIPPYME_LANGUAGE).
         # 'multi' / '' / unset → let Whisper auto-detect.
         _lang_override = (os.getenv("CLIPPYME_LANGUAGE") or "").strip().lower()
@@ -302,7 +295,7 @@ def transcribe_video(video_path):
 
         whisper_res = transcribe_with_whisper(
             asr_input,
-            model_name=WHISPER_MODEL,
+            model_name=whisper_model,
             device=device,
             compute_type=compute_type,
             language=_whisper_lang,

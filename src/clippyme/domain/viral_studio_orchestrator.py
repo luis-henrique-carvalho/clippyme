@@ -289,8 +289,15 @@ async def process_viral_item(item_id: str) -> Dict[str, Any]:
             # 2. Context Extraction (PySceneDetect keyframes + Whisper + metadata)
             # ------------------------------------------------------------------
             viral_studio_store.update_item(item_id, {"status": "ANALYZING"})
-            from clippyme.pipeline.hardware import WHISPER_DEVICE, WHISPER_MODEL, GPU_BACKEND, CUDA_AVAILABLE
-            model_info = f"{WHISPER_MODEL} via {GPU_BACKEND}" if (WHISPER_DEVICE == "cuda" and CUDA_AVAILABLE) else f"{WHISPER_MODEL} via CPU"
+            model_override = item.get("model")
+            if not model_override and batch_id:
+                batch_dict = viral_studio_store.get_batch(batch_id)
+                if batch_dict:
+                    model_override = batch_dict.get("model")
+
+            from clippyme.pipeline.hardware import resolve_whisper_compute, GPU_BACKEND, CUDA_AVAILABLE
+            dyn_device, dyn_model = resolve_whisper_compute(model_override)
+            model_info = f"{dyn_model} via {GPU_BACKEND}" if (dyn_device == "cuda" and CUDA_AVAILABLE) else f"{dyn_model} via CPU"
             append_item_log(
                 item_id,
                 "ANALYZING",
@@ -308,6 +315,7 @@ async def process_viral_item(item_id: str) -> Dict[str, Any]:
                     keyframes_dir=keyframes_dir,
                     batch_id=batch_id,
                     item_id=item_id,
+                    ai_model=model_override,
                 )
             except TypeError:
                 video_context = viral_studio_context.extract_viral_context(
