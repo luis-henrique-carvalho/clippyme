@@ -649,6 +649,40 @@ def test_patch_item(api_client):
     assert updated["product_code"] == "NEW_CODE_99"
 
 
+def test_create_batch_and_patch_item_with_model(api_client):
+    """POST /api/viral-studio/batches with model propagates to items and allows PATCH model."""
+    api_client.post(
+        "/api/viral-studio/brands",
+        json={"id": "model-test-brand", "name": "Model Brand", "handle": "@modelbrand"},
+    )
+    b_resp = api_client.post(
+        "/api/viral-studio/batches",
+        json={
+            "brand_id": "model-test-brand",
+            "model": "ollama:llama3.2",
+            "items": [
+                {"source_url": "https://www.instagram.com/reel/C_MODEL_1/"},
+                {"source_url": "https://www.instagram.com/reel/C_MODEL_2/", "model": "gemini:gemini-3.6-flash"},
+            ],
+        },
+    )
+    assert b_resp.status_code == 201, b_resp.text
+    b = b_resp.json()
+    assert b["model"] == "ollama:llama3.2"
+    assert b["items"][0]["model"] == "ollama:llama3.2"
+    assert b["items"][1]["model"] == "gemini:gemini-3.6-flash"
+
+    # Patch first item with different model
+    item_id = b["items"][0]["id"]
+    patch_resp = api_client.patch(
+        f"/api/viral-studio/items/{item_id}",
+        json={"model": "gemini:gemini-3.5-flash-lite"},
+    )
+    assert patch_resp.status_code == 200, patch_resp.text
+    assert patch_resp.json()["model"] == "gemini:gemini-3.5-flash-lite"
+
+
+
 def test_patch_nonexistent_item_returns_404(api_client):
     """PATCH /api/viral-studio/items/{id} on missing item returns 404."""
     resp = api_client.patch(

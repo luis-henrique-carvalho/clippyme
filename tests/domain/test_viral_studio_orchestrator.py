@@ -437,3 +437,71 @@ async def test_process_viral_item_persists_logs_and_context(tmp_store_and_output
     # Check timestamp format
     assert all("timestamp" in l and "message" in l for l in logs)
 
+
+@pytest.mark.asyncio
+async def test_batch_and_item_model_propagation(tmp_store_and_output):
+    """Batch and items correctly store and inherit model configuration."""
+    batch = viral_studio_store.create_batch({
+        "brand_id": "vale-o-clique",
+        "model": "ollama:llama3.2",
+        "items": [
+            {"source_url": "https://instagram.com/reel/1"},
+            {"source_url": "https://instagram.com/reel/2", "model": "gemini:gemini-3.6-flash"},
+        ],
+    })
+
+    assert batch["model"] == "ollama:llama3.2"
+    assert batch["items"][0]["model"] == "ollama:llama3.2"
+    assert batch["items"][1]["model"] == "gemini:gemini-3.6-flash"
+
+    # Test update_item with model
+    updated = viral_studio_store.update_item(batch["items"][0]["id"], {"model": "gemini:gemini-3.5-flash-lite"})
+    assert updated["model"] == "gemini:gemini-3.5-flash-lite"
+
+
+@pytest.mark.asyncio
+async def test_process_viral_item_passes_model_to_copy(tmp_store_and_output, monkeypatch):
+    """process_viral_item forwards item/batch model to generate_affiliate_copy."""
+    batch = viral_studio_store.create_batch({
+        "brand_id": "vale-o-clique",
+        "model": "ollama:llama3.2",
+        "items": [
+            {"source_url": "https://instagram.com/reel/MODEL_TEST"},
+        ],
+    })
+    item_id = batch["items"][0]["id"]
+
+    captured_model = []
+
+    def fake_dl(url, out_path, timeout=120):
+        os.makedirs(os.path.dirname(out_path), exist_ok=True)
+        with open(out_path, "wb") as f:
+            f.write(b"video data")
+        return out_path
+
+    async def fake_copy(brand, item, video_path=None, video_context=None, model=None):
+        captured_model.append(model)
+        return AICopyData(
+            product="Produto",
+            product_description="Desc",
+            headlines=["H1", "H2", "H3", "H4", "H5"],
+            selected_headline="H1",
+            caption="Caption",
+            hashtags=[],
+        )
+
+    def fake_render(source_path, brand, template, headline, output_path, watermark=True):
+        os.makedirs(os.path.dirname(output_path), exist_ok=True)
+        with open(output_path, "wb") as f:
+            f.write(b"rendered")
+        return output_path
+
+    monkeypatch.setattr("clippyme.domain.viral_studio_download.download_viral_video", fake_dl)
+    monkeypatch.setattr("clippyme.domain.viral_studio_copy.generate_affiliate_copy", fake_copy)
+    monkeypatch.setattr("clippyme.domain.viral_studio_renderer.render_viral_video", fake_render)
+
+    res = await viral_studio_orchestrator.process_viral_item(item_id)
+    assert res["status"] == "READY_FOR_REVIEW"
+    assert captured_model == ["ollama:llama3.2"]
+
+

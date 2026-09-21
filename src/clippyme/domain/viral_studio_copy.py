@@ -28,8 +28,11 @@ logger = logging.getLogger("clippyme.viral_studio_copy")
 MODEL_PRICING = {
     "gemini-3.6-flash": {"input": 1.50, "output": 9.00},
     "gemini-3.5-flash": {"input": 1.50, "output": 9.00},
+    "gemini-3.5-flash-lite": {"input": 0.075, "output": 0.30},
     "gemini-3.1-pro-preview": {"input": 2.00, "output": 12.00},
     "gemini-3.1-flash-lite": {"input": 0.10, "output": 0.40},
+    "gemini-2.5-flash": {"input": 0.15, "output": 0.60},
+    "gemini-2.5-pro": {"input": 1.25, "output": 5.00},
     "gemini-2.0-flash": {"input": 0.10, "output": 0.40},
     "gemini-2.0-flash-lite": {"input": 0.075, "output": 0.30},
 }
@@ -60,11 +63,276 @@ DEFAULT_FALLBACK_HASHTAGS = [
 ]
 
 DEFAULT_MODELS_FALLBACK_CHAIN = [
-    "gemini-3.6-flash",
+    "gemini-3.5-flash-lite",
     "gemini-3.5-flash",
+    "gemini-3.6-flash",
     "gemini-3.1-pro-preview",
-    "gemini-3.1-flash-lite",
 ]
+
+
+def parse_model_identifier(model_str: Optional[str]) -> tuple[str, str]:
+    """Parse a model identifier string (e.g. 'gemini:gemini-3.5-flash', 'ollama:llama3.2', or un-prefixed).
+
+    Returns a tuple of (provider, model_name). Default provider is 'gemini'.
+    """
+    if not model_str or not str(model_str).strip():
+        return ("gemini", "")
+    s = str(model_str).strip()
+    if ":" in s:
+        p, m = s.split(":", 1)
+        return (p.strip().lower(), m.strip())
+    if s.lower().startswith("gemini"):
+        return ("gemini", s)
+    if any(s.lower().startswith(prefix) for prefix in ("ollama", "llama", "qwen", "mistral", "deepseek", "phi", "gemma")):
+        if s.lower().startswith("ollama"):
+            return ("ollama", s[6:].lstrip(":/ "))
+        return ("ollama", s)
+    return ("gemini", s)
+
+
+class BaseAIProvider:
+    """Abstract base class for commercial copy AI generation providers."""
+
+    async def generate_copy(
+        self,
+        prompt: str,
+        model_name: str,
+        *,
+        contents_payload: Any = None,
+        api_key: Optional[str] = None,
+    ) -> tuple[str, Dict[str, Any]]:
+        raise NotImplementedError
+
+
+class GeminiProvider(BaseAIProvider):
+    """Google Gemini AI copy generator with automatic fallback chain."""
+
+    async def generate_copy(
+        self,
+        prompt: str,
+        model_name: str,
+        *,
+        contents_payload: Any = None,
+        api_key: Optional[str] = None,
+    ) -> tuple[str, Dict[str, Any]]:
+        import os
+        from google import genai
+
+        resolved_api_key = (
+            api_key
+            or load_persistent_config().get("GEMINI_API_KEY")
+            or os.environ.get("GEMINI_API_KEY", "")
+            or ""
+        )
+        if not resolved_api_key:
+            raise ValidationError("Gemini API key is not configured")
+
+        configured_model = model_name or load_persistent_config().get("GEMINI_MODEL") or "gemini-3.5-flash"
+        candidate_models = [configured_model]
+        for m in DEFAULT_MODELS_FALLBACK_CHAIN:
+            if m not in candidate_models:
+                candidate_models.append(m)
+
+        client = genai.Client(api_key=resolved_api_key)
+        payload = contents_payload if contents_payload is not None else prompt
+
+        raw_response_text: Optional[str] = None
+        last_error: Optional[Exception] = None
+        succeeded_model: Optional[str] = None
+        latency_ms: int = 0
+        prompt_tokens: int = 0
+        candidate_tokens: int = 0
+        total_tokens: int = 0
+
+        for candidate_model in candidate_models:
+            try:
+                logger.info("GeminiProvider: Attempting model %s", candidate_model)
+                t0 = time.monotonic()
+                if hasattr(client, "aio") and hasattr(client.aio, "models"):
+                    resp = await client.aio.models.generate_content(
+                        model=candidate_model,
+                        contents=payload,
+                    )
+                else:
+                    resp = await asyncio.to_thread(
+                        client.models.generate_content,
+                        model=candidate_model,
+                        contents=payload,
+                    )
+                latency_ms = max(1, int((time.monotonic() - t0) * 1000))
+
+                raw_response_text = getattr(resp, "text", None) or ""
+                if raw_response_text.strip():
+                    succeeded_model = candidate_model
+                    usage = getattr(resp, "usage_metadata", None)
+                    if usage:
+                        prompt_tokens = getattr(usage, "prompt_token_count", 0) or 0
+                        candidate_tokens = getattr(usage, "candidates_token_count", 0) or 0
+                        total_tokens = getattr(usage, "total_token_count", 0) or (prompt_tokens + candidate_tokens)
+                    logger.info("GeminiProvider: Success with model %s (%d ms)", candidate_model, latency_ms)
+                    break
+            except Exception as exc:
+                last_error = exc
+                logger.warning(
+                    "GeminiProvider: Model %s failed (%s); trying fallback",
+                    candidate_model,
+                    _redact_key(str(exc)),
+                )
+
+        if raw_response_text is None or not raw_response_text.strip():
+            if last_error is not None:
+                raise ClippyMeError(
+                    f"Gemini affiliate copy generation failed: {_redact_key(str(last_error))}"
+                )
+            raise ClippyMeError("Gemini returned empty response for affiliate copy")
+
+        if not prompt_tokens and prompt:
+            prompt_tokens = max(1, len(prompt) // 4)
+        if not candidate_tokens and raw_response_text:
+            candidate_tokens = max(1, len(raw_response_text) // 4)
+        if not total_tokens:
+            total_tokens = prompt_tokens + candidate_tokens
+
+        used_model = succeeded_model or configured_model
+        pricing = MODEL_PRICING.get(used_model, {"input": 0.30, "output": 2.50})
+        estimated_cost_usd = round(
+            (prompt_tokens * pricing["input"] + candidate_tokens * pricing["output"]) / 1_000_000, 6
+        )
+
+        telemetry_data = {
+            "provider": "gemini",
+            "model": used_model,
+            "model_used": used_model,
+            "prompt_tokens": prompt_tokens,
+            "candidate_tokens": candidate_tokens,
+            "total_tokens": total_tokens,
+            "estimated_cost_usd": estimated_cost_usd,
+            "cost_usd": estimated_cost_usd,
+            "latency_ms": latency_ms,
+            "prompt": prompt,
+            "raw_response": raw_response_text,
+        }
+        return raw_response_text, telemetry_data
+
+
+class OllamaProvider(BaseAIProvider):
+    """Local Ollama AI copy generator supporting /api/generate endpoint."""
+
+    def __init__(self, base_url: Optional[str] = None):
+        self._base_url = base_url
+
+    def _resolve_base_url(self) -> str:
+        import os
+        url = (
+            self._base_url
+            or os.environ.get("OLLAMA_BASE_URL")
+            or load_persistent_config().get("OLLAMA_BASE_URL")
+            or "http://localhost:11434"
+        )
+        return str(url).rstrip("/")
+
+    def _sync_generate(
+        self,
+        base_url: str,
+        model_name: str,
+        prompt: str,
+        images: Optional[List[str]] = None,
+    ) -> Dict[str, Any]:
+        import json
+        import urllib.error
+        import urllib.request
+
+        endpoint = f"{base_url}/api/generate"
+        req_body: Dict[str, Any] = {
+            "model": model_name,
+            "prompt": prompt,
+            "stream": False,
+            "format": "json",
+        }
+        if images and isinstance(images, list):
+            req_body["images"] = images
+
+        data_bytes = json.dumps(req_body).encode("utf-8")
+        req = urllib.request.Request(
+            endpoint,
+            data=data_bytes,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+
+        try:
+            with urllib.request.urlopen(req, timeout=120) as response:
+                status_code = response.getcode()
+                resp_bytes = response.read()
+                if status_code >= 400:
+                    raise ClippyMeError(
+                        f"Ollama API returned HTTP {status_code}: {resp_bytes.decode('utf-8', errors='replace')}"
+                    )
+                return json.loads(resp_bytes.decode("utf-8"))
+        except urllib.error.HTTPError as err:
+            err_body = err.read().decode("utf-8", errors="replace") if hasattr(err, "read") else str(err)
+            raise ClippyMeError(f"Ollama HTTP error {err.code} ({model_name} at {base_url}): {err_body}") from err
+        except urllib.error.URLError as err:
+            raise ClippyMeError(f"Cannot connect to Ollama ({model_name} at {base_url}): {err.reason}") from err
+        except Exception as exc:
+            raise ClippyMeError(f"Ollama generation failed ({model_name} at {base_url}): {exc}") from exc
+
+    async def generate_copy(
+        self,
+        prompt: str,
+        model_name: str,
+        *,
+        contents_payload: Any = None,
+        api_key: Optional[str] = None,
+    ) -> tuple[str, Dict[str, Any]]:
+        import base64
+        base_url = self._resolve_base_url()
+        used_model = model_name or "llama3.2"
+        logger.info("OllamaProvider: Calling Ollama model %s at %s", used_model, base_url)
+
+        # Extract base64 image frames if multimodal payload is supplied
+        images_b64: List[str] = []
+        if isinstance(contents_payload, list):
+            for part in contents_payload:
+                if hasattr(part, "inline_data") and hasattr(part.inline_data, "data"):
+                    b = part.inline_data.data
+                    if isinstance(b, bytes):
+                        images_b64.append(base64.b64encode(b).decode("utf-8"))
+                elif isinstance(part, bytes):
+                    images_b64.append(base64.b64encode(part).decode("utf-8"))
+
+        t0 = time.monotonic()
+        data = await asyncio.to_thread(self._sync_generate, base_url, used_model, prompt, images_b64 or None)
+        elapsed_ms = max(1, int((time.monotonic() - t0) * 1000))
+
+        raw_response = data.get("response", "")
+        if not raw_response or not str(raw_response).strip():
+            raise ClippyMeError(f"Ollama returned empty response for model {used_model}")
+
+        raw_response_text = str(raw_response)
+        total_duration_ns = data.get("total_duration") or 0
+        latency_ms = max(1, int(total_duration_ns / 1_000_000)) if total_duration_ns else elapsed_ms
+
+        prompt_eval_count = data.get("prompt_eval_count") or 0
+        eval_count = data.get("eval_count") or 0
+        prompt_tokens = prompt_eval_count or max(1, len(prompt) // 4)
+        candidate_tokens = eval_count or max(1, len(raw_response_text) // 4)
+        total_tokens = prompt_tokens + candidate_tokens
+
+        telemetry_data = {
+            "provider": "ollama",
+            "model": f"ollama:{used_model}",
+            "model_used": f"ollama:{used_model}",
+            "prompt_tokens": prompt_tokens,
+            "candidate_tokens": candidate_tokens,
+            "total_tokens": total_tokens,
+            "estimated_cost_usd": 0.0,
+            "cost_usd": 0.0,
+            "latency_ms": latency_ms,
+            "prompt": prompt,
+            "raw_response": raw_response_text,
+        }
+        return raw_response_text, telemetry_data
 
 
 def _extract_field(obj: Any, field_name: str, default: Any = None) -> Any:
@@ -576,30 +844,16 @@ async def generate_affiliate_copy(
             logger.info("generate_affiliate_copy: Returning cached AICopyData for item")
             return copy_obj
 
-    # 2. Key resolution
-    import os
-
-    resolved_api_key = (
-        api_key
-        or load_persistent_config().get("GEMINI_API_KEY")
-        or os.environ.get("GEMINI_API_KEY", "")
-        or ""
-    )
-    if not resolved_api_key:
-        raise ValidationError("Gemini API key is not configured")
-
-    # 3. Model ladder resolution
+    # 2. Resolve model and provider
     configured_model = (
         model
+        or _extract_field(item, "model")
         or load_persistent_config().get("GEMINI_MODEL")
         or "gemini-3.5-flash"
     )
-    candidate_models = [configured_model]
-    for m in DEFAULT_MODELS_FALLBACK_CHAIN:
-        if m not in candidate_models:
-            candidate_models.append(m)
+    provider_name, model_subname = parse_model_identifier(configured_model)
 
-    # 4. Multi-Signal Video Context extraction (if video file is available and context not supplied)
+    # 3. Multi-Signal Video Context extraction (if video file is available and context not supplied)
     resolved_context = video_context
     target_video_file = video_path or _extract_field(item, "source_path")
     if resolved_context is None and target_video_file and os.path.isfile(target_video_file):
@@ -622,7 +876,7 @@ async def generate_affiliate_copy(
         elif isinstance(resolved_context, dict):
             context_summary = resolved_context
 
-    # 5. Build prompt with context
+    # 4. Build prompt with context
     product_code = _extract_field(item, "product_code")
     product_url = _extract_field(item, "product_url")
     instructions = (
@@ -639,7 +893,7 @@ async def generate_affiliate_copy(
         video_context=resolved_context,
     )
 
-    # 6. Prepare multimodal payload with frame images if available
+    # 5. Prepare multimodal payload with frame images if available
     contents_payload: Any = prompt
     keyframes = _extract_field(resolved_context, "keyframes", [])
     if keyframes and isinstance(keyframes, list):
@@ -655,88 +909,25 @@ async def generate_affiliate_copy(
         except Exception as exc:
             logger.debug("Could not attach visual frame parts: %s", exc)
 
-    # 7. Call Gemini API across fallback ladder
-    from google import genai
+    # 6. Execute generation via resolved provider
+    if provider_name == "ollama":
+        ollama_prov = OllamaProvider()
+        raw_response_text, telemetry_data = await ollama_prov.generate_copy(
+            prompt=prompt,
+            model_name=model_subname,
+            contents_payload=contents_payload,
+            api_key=api_key,
+        )
+    else:
+        gemini_prov = GeminiProvider()
+        raw_response_text, telemetry_data = await gemini_prov.generate_copy(
+            prompt=prompt,
+            model_name=model_subname,
+            contents_payload=contents_payload,
+            api_key=api_key,
+        )
 
-    client = genai.Client(api_key=resolved_api_key)
-    raw_response_text: Optional[str] = None
-    last_error: Optional[Exception] = None
-    succeeded_model: Optional[str] = None
-    latency_ms: int = 0
-    prompt_tokens: int = 0
-    candidate_tokens: int = 0
-    total_tokens: int = 0
-
-    for candidate_model in candidate_models:
-        try:
-            logger.info("generate_affiliate_copy: Attempting model %s", candidate_model)
-            t0 = time.monotonic()
-            if hasattr(client, "aio") and hasattr(client.aio, "models"):
-                resp = await client.aio.models.generate_content(
-                    model=candidate_model,
-                    contents=contents_payload,
-                )
-            else:
-                resp = await asyncio.to_thread(
-                    client.models.generate_content,
-                    model=candidate_model,
-                    contents=contents_payload,
-                )
-            latency_ms = max(1, int((time.monotonic() - t0) * 1000))
-
-            raw_response_text = getattr(resp, "text", None) or ""
-            if raw_response_text.strip():
-                succeeded_model = candidate_model
-                usage = getattr(resp, "usage_metadata", None)
-                if usage:
-                    prompt_tokens = getattr(usage, "prompt_token_count", 0) or 0
-                    candidate_tokens = getattr(usage, "candidates_token_count", 0) or 0
-                    total_tokens = getattr(usage, "total_token_count", 0) or (prompt_tokens + candidate_tokens)
-                logger.info("generate_affiliate_copy: Success with model %s (%d ms)", candidate_model, latency_ms)
-                break
-        except Exception as exc:
-            last_error = exc
-            logger.warning(
-                "generate_affiliate_copy: Model %s failed (%s); trying fallback",
-                candidate_model,
-                _redact_key(str(exc)),
-            )
-
-    if raw_response_text is None or not raw_response_text.strip():
-        if last_error is not None:
-            raise ClippyMeError(
-                f"Gemini affiliate copy generation failed: {_redact_key(str(last_error))}"
-            )
-        raise ClippyMeError("Gemini returned empty response for affiliate copy")
-
-    # Fallback token estimation if usage metadata was not returned by API
-    if not prompt_tokens and prompt:
-        prompt_tokens = max(1, len(prompt) // 4)
-    if not candidate_tokens and raw_response_text:
-        candidate_tokens = max(1, len(raw_response_text) // 4)
-    if not total_tokens:
-        total_tokens = prompt_tokens + candidate_tokens
-
-    model_name = succeeded_model or configured_model
-    pricing = MODEL_PRICING.get(model_name, {"input": 0.30, "output": 2.50})
-    estimated_cost_usd = round(
-        (prompt_tokens * pricing["input"] + candidate_tokens * pricing["output"]) / 1_000_000, 6
-    )
-
-    telemetry_data = {
-        "model": model_name,
-        "model_used": model_name,
-        "prompt_tokens": prompt_tokens,
-        "candidate_tokens": candidate_tokens,
-        "total_tokens": total_tokens,
-        "estimated_cost_usd": estimated_cost_usd,
-        "cost_usd": estimated_cost_usd,
-        "latency_ms": latency_ms,
-        "prompt": prompt,
-        "raw_response": raw_response_text,
-    }
-
-    # 8. Parse and validate response
+    # 7. Parse and validate response
     copy_data = parse_affiliate_copy_response(
         raw_text=raw_response_text,
         default_cta=default_cta,
@@ -816,4 +1007,8 @@ __all__ = [
     "build_affiliate_copy_prompt",
     "parse_affiliate_copy_response",
     "generate_affiliate_copy",
+    "parse_model_identifier",
+    "BaseAIProvider",
+    "GeminiProvider",
+    "OllamaProvider",
 ]

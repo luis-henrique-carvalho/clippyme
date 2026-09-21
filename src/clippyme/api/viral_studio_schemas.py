@@ -474,6 +474,7 @@ class ViralItemInput(BaseModel):
     product_url: Optional[str] = Field(None, max_length=2048)
     manual_headline: Optional[str] = Field(None, max_length=300)
     additional_instructions: Optional[str] = Field(None, max_length=1000)
+    model: Optional[str] = Field(None, max_length=128)
 
     @field_validator("source_url")
     @classmethod
@@ -492,6 +493,7 @@ class ViralItemInput(BaseModel):
 class BatchCreateRequest(BaseModel):
     brand_id: str = Field(..., min_length=1, max_length=64)
     template_id: Optional[str] = Field(None, max_length=64)
+    model: Optional[str] = Field(None, max_length=128)
     items: List[ViralItemInput] = Field(..., min_length=1, max_length=100)
 
     @field_validator("brand_id")
@@ -515,6 +517,7 @@ class ViralItem(BaseModel):
     id: str
     batch_id: Optional[str] = None
     brand_id: Optional[str] = None
+    model: Optional[str] = None
     source_url: str
     product_code: Optional[str] = None
     product_url: Optional[str] = None
@@ -545,6 +548,7 @@ class BatchResponse(BaseModel):
     batch_id: str
     brand_id: str
     template_id: Optional[str] = None
+    model: Optional[str] = None
     status: str = "PENDING"
     total_items: int = 0
     items: List[ViralItem] = Field(default_factory=list)
@@ -586,6 +590,7 @@ class ViralItemUpdate(BaseModel):
     product_url: Optional[str] = Field(None, max_length=2048)
     manual_headline: Optional[str] = Field(None, max_length=300)
     additional_instructions: Optional[str] = Field(None, max_length=1000)
+    model: Optional[str] = Field(None, max_length=128)
 
     model_config = ConfigDict(extra="forbid")
 

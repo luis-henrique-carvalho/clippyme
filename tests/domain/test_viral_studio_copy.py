@@ -1,5 +1,6 @@
 """Unit tests for commercial AI copy generation (Milestone 3)."""
 import asyncio
+import json
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -884,6 +885,152 @@ def test_generate_affiliate_copy_captures_llm_telemetry(sample_brand, sample_ite
         update_args = mock_update.call_args[0][1]
         assert "ai_telemetry" in update_args
         assert update_args["ai_telemetry"]["total_tokens"] == 650
+
+
+# ============================================================================
+# Model Selection & Provider Architecture Tests
+# ============================================================================
+
+def test_parse_model_identifier():
+    assert viral_studio_copy.parse_model_identifier(None) == ("gemini", "")
+    assert viral_studio_copy.parse_model_identifier("") == ("gemini", "")
+    assert viral_studio_copy.parse_model_identifier("gemini:gemini-3.5-flash") == ("gemini", "gemini-3.5-flash")
+    assert viral_studio_copy.parse_model_identifier("gemini:gemini-3.5-flash-lite") == ("gemini", "gemini-3.5-flash-lite")
+    assert viral_studio_copy.parse_model_identifier("gemini:gemini-3.6-flash") == ("gemini", "gemini-3.6-flash")
+    assert viral_studio_copy.parse_model_identifier("gemini:gemini-3.1-pro-preview") == ("gemini", "gemini-3.1-pro-preview")
+    assert viral_studio_copy.parse_model_identifier("ollama:llama3.2") == ("ollama", "llama3.2")
+    assert viral_studio_copy.parse_model_identifier("ollama:qwen2.5") == ("ollama", "qwen2.5")
+    assert viral_studio_copy.parse_model_identifier("llama3.2") == ("ollama", "llama3.2")
+    assert viral_studio_copy.parse_model_identifier("qwen2.5") == ("ollama", "qwen2.5")
+    assert viral_studio_copy.parse_model_identifier("gemini-3.5-flash") == ("gemini", "gemini-3.5-flash")
+
+
+def test_ollama_provider_success():
+    provider = viral_studio_copy.OllamaProvider(base_url="http://localhost:11434")
+    fake_json_resp = {
+        "response": json.dumps({
+            "product": "Mini Selador Ollama",
+            "product_description": "Selador térmico portátil",
+            "headlines": ["Headline 1", "Headline 2", "Headline 3", "Headline 4", "Headline 5"],
+            "selected_headline": "Headline 1",
+            "caption": "Legenda gerada por Ollama",
+            "hashtags": ["#ollama", "#achadinhos"],
+        }),
+        "total_duration": 2500000000,  # 2.5s -> 2500ms
+        "prompt_eval_count": 120,
+        "eval_count": 85,
+    }
+
+    with patch.object(provider, "_sync_generate", return_value=fake_json_resp):
+        raw_text, telemetry = asyncio.run(provider.generate_copy("prompt text", "llama3.2"))
+        assert "Mini Selador Ollama" in raw_text
+        assert telemetry["provider"] == "ollama"
+        assert telemetry["model"] == "ollama:llama3.2"
+        assert telemetry["prompt_tokens"] == 120
+        assert telemetry["candidate_tokens"] == 85
+        assert telemetry["total_tokens"] == 205
+        assert telemetry["latency_ms"] == 2500
+        assert telemetry["cost_usd"] == 0.0
+
+
+def test_ollama_provider_connection_error_raises_clippyme_error():
+    import urllib.error
+    provider = viral_studio_copy.OllamaProvider(base_url="http://localhost:11434")
+    with patch("urllib.request.urlopen", side_effect=urllib.error.URLError("Connection refused")):
+        with pytest.raises(ClippyMeError, match="Cannot connect to Ollama"):
+            asyncio.run(provider.generate_copy("prompt text", "llama3.2"))
+
+
+def test_ollama_provider_empty_response_raises_clippyme_error():
+    provider = viral_studio_copy.OllamaProvider(base_url="http://localhost:11434")
+    with patch.object(provider, "_sync_generate", return_value={"response": ""}):
+        with pytest.raises(ClippyMeError, match="Ollama returned empty response"):
+            asyncio.run(provider.generate_copy("prompt text", "llama3.2"))
+
+
+def test_generate_affiliate_copy_with_ollama_provider(sample_brand, sample_item):
+    fake_json_resp = {
+        "response": json.dumps({
+            "product": "Suporte Articulado Local",
+            "product_description": "Suporte articulado para monitor",
+            "headlines": [
+                "Melhore sua postura no home office!",
+                "Organize sua mesa agora!",
+                "Esse suporte vai transformar seu setup!",
+                "Prático e super resistente!",
+                "Achadinho perfeito para o escritório!",
+            ],
+            "selected_headline": "Melhore sua postura no home office!",
+            "caption": "Melhore sua postura com esse suporte incrível!\\n📌 Produto PROD-99\\nConfira no link da bio!\\n#homeoffice #dicas",
+            "hashtags": ["#homeoffice", "#dicas", "#achadinhos"],
+        }),
+        "total_duration": 1800000000,
+        "prompt_eval_count": 150,
+        "eval_count": 90,
+    }
+
+    item_dict = {
+        "id": "item-ollama-01",
+        "source_url": "https://instagram.com/reel/123",
+        "product_code": "PROD-99",
+        "model": "ollama:llama3.2",
+    }
+
+    with patch.object(viral_studio_copy.OllamaProvider, "_sync_generate", return_value=fake_json_resp), \
+         patch("clippyme.domain.viral_studio_store.update_item") as mock_update:
+
+        copy_res = asyncio.run(viral_studio_copy.generate_affiliate_copy(
+            brand=sample_brand,
+            item=item_dict,
+        ))
+
+        assert copy_res.product == "Suporte Articulado Local"
+        assert copy_res.selected_headline == "Melhore sua postura no home office!"
+        assert "PROD-99" in copy_res.caption
+        assert item_dict["ai_telemetry"]["provider"] == "ollama"
+        assert item_dict["ai_telemetry"]["model"] == "ollama:llama3.2"
+        assert item_dict["ai_telemetry"]["cost_usd"] == 0.0
+        assert mock_update.called
+
+
+def test_generate_affiliate_copy_with_gemini_prefix(sample_brand):
+    mock_resp = MagicMock()
+    mock_resp.text = json.dumps({
+        "product": "Mini Processador",
+        "product_description": "Processador manual de alimentos",
+        "headlines": ["H1", "H2", "H3", "H4", "H5"],
+        "selected_headline": "H1",
+        "caption": "Legenda com link",
+        "hashtags": ["#cozinha"],
+    })
+    mock_resp.usage_metadata = MagicMock()
+    mock_resp.usage_metadata.prompt_token_count = 100
+    mock_resp.usage_metadata.candidates_token_count = 50
+    mock_resp.usage_metadata.total_token_count = 150
+
+    mock_models = AsyncMock()
+    mock_models.generate_content.return_value = mock_resp
+    mock_client = MagicMock()
+    mock_client.aio.models = mock_models
+
+    item_dict = {
+        "id": "item-gemini-prefix",
+        "source_url": "https://instagram.com/reel/456",
+    }
+
+    with patch("google.genai.Client", return_value=mock_client):
+        copy_res = asyncio.run(viral_studio_copy.generate_affiliate_copy(
+            brand=sample_brand,
+            item=item_dict,
+            api_key="test-key",
+            model="gemini:gemini-3.6-flash",
+        ))
+        assert copy_res.product == "Mini Processador"
+        assert item_dict["ai_telemetry"]["model"] == "gemini-3.6-flash"
+        mock_models.generate_content.assert_called_once()
+        call_kwargs = mock_models.generate_content.call_args[1]
+        assert call_kwargs["model"] == "gemini-3.6-flash"
+
 
 
 

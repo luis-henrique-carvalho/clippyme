@@ -33,6 +33,29 @@ export const GEMINI_MODELS = [
   ['gemini-2.5-pro', '2.5 Pro · max quality'],
 ];
 
+// Per-batch AI Model picker options for Viral Content Studio.
+// Grouped by provider: Google Gemini (Cloud) and Ollama (Local).
+export const AI_MODELS = [
+  {
+    group: 'Google Gemini (Nuvem)',
+    options: [
+      ['gemini:gemini-3.5-flash-lite', '3.5 Flash Lite · Super Econômico ⚡'],
+      ['gemini:gemini-3.5-flash', '3.5 Flash · Recomendado ⭐'],
+      ['gemini:gemini-3.6-flash', '3.6 Flash · Última Geração 🚀'],
+      ['gemini:gemini-3.1-pro-preview', '3.1 Pro · Máxima Inteligência 🧠'],
+    ],
+  },
+  {
+    group: 'Ollama (Local / Gratuito)',
+    options: [
+      ['ollama:llama3.2-vision', 'Llama 3.2 Vision (Imagens + Texto 📸)'],
+      ['ollama:llama3.2', 'Llama 3.2 (Texto Rápido ⚡)'],
+      ['ollama:qwen2.5', 'Qwen 2.5 (Texto)'],
+      ['ollama:minicpm-v', 'MiniCPM-V (Imagens + Texto 📸)'],
+    ],
+  },
+];
+
 // Classic-mode subtitle fonts. Values are the bundled TTF basenames libass
 // resolves from `fonts/` (Verdana falls back to a system face). The backend
 // validates the name against `_FONT_NAME_RE` in subtitles.py.

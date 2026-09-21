@@ -10,6 +10,7 @@ import { relTime } from '../lib/relTime';
 import { LazyVideo } from './LazyVideo';
 import { ViralEditModal } from './ViralEditModal';
 import { DiscoveryPanel } from './DiscoveryPanel';
+import { AI_MODELS } from './data';
 import {
   getBrands,
   createBrand,
@@ -227,6 +228,7 @@ export function ViralStudioView({ onOpenPublish, pushToast }) {
   const [templates, setTemplates] = useState([]);
   const [selectedBrandId, setSelectedBrandId] = useState('');
   const [selectedTemplateId, setSelectedTemplateId] = useState('');
+  const [selectedModel, setSelectedModel] = useState('');
   const [batches, setBatches] = useState([]);
   const [activeBatchId, setActiveBatchId] = useState(null);
   const [activeBatch, setActiveBatch] = useState(null);
@@ -352,6 +354,7 @@ export function ViralStudioView({ onOpenPublish, pushToast }) {
       const payload = {
         brand_id: selectedBrandId,
         template_id: selectedTemplateId,
+        model: selectedModel || undefined,
         items: parsedItems.map((it) => ({
           source_url: it.source_url,
           product_code: it.product_code?.trim() || undefined,
@@ -388,6 +391,17 @@ export function ViralStudioView({ onOpenPublish, pushToast }) {
   const currentTemplate = useMemo(() => {
     return templates.find((t) => t.id === (activeBatch?.template_id || selectedTemplateId)) || null;
   }, [templates, activeBatch, selectedTemplateId]);
+
+  const selectedModelLabel = useMemo(() => {
+    if (!selectedModel) return 'Padrão Gemini';
+    for (const group of AI_MODELS) {
+      const found = group.options.find(([val]) => val === selectedModel);
+      if (found) {
+        return found[1].split(' · ')[0];
+      }
+    }
+    return selectedModel;
+  }, [selectedModel]);
 
   const items = activeBatch?.items || [];
   const readyCount = items.filter((it) => it.status === 'READY_FOR_REVIEW' || it.status === 'APPROVED' || it.status === 'PUBLISHED').length;
@@ -964,13 +978,13 @@ export function ViralStudioView({ onOpenPublish, pushToast }) {
               )}
             </Panel>
 
-            {/* Configuração da Marca e Template */}
+            {/* Configuração da Marca, Template e Modelo de IA */}
             <Panel
               title="Marca & Template"
-              sub="Personalize a assinatura comercial e estilo visual dos vídeos"
+              sub="Personalize a assinatura comercial, estilo visual e modelo de inteligência artificial"
               icon="stamp"
             >
-              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(280px, 1fr))', gap: 16 }}>
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(240px, 1fr))', gap: 16 }}>
                 <div className="field" style={{ marginBottom: 0 }}>
                   <span className="field-label">
                     <Icon n="tag" /> Marca Comercial
@@ -1011,6 +1025,26 @@ export function ViralStudioView({ onOpenPublish, pushToast }) {
                     ))}
                   </select>
                 </div>
+
+                <div className="field" style={{ marginBottom: 0 }}>
+                  <span className="field-label">
+                    <Icon n="sparkles" /> Modelo de IA
+                  </span>
+                  <select
+                    className="sel"
+                    value={selectedModel}
+                    onChange={(e) => setSelectedModel(e.target.value)}
+                  >
+                    <option value="">Padrão (Configurações)</option>
+                    {AI_MODELS.map((group) => (
+                      <optgroup key={group.group} label={group.group}>
+                        {group.options.map(([val, lbl]) => (
+                          <option key={val} value={val}>{lbl}</option>
+                        ))}
+                      </optgroup>
+                    ))}
+                  </select>
+                </div>
               </div>
             </Panel>
           </div>
@@ -1027,7 +1061,7 @@ export function ViralStudioView({ onOpenPublish, pushToast }) {
                 <span className="chip">9:16 Vertical</span>
                 {currentBrand && <span className="chip">{currentBrand.name}</span>}
                 {currentTemplate && <span className="chip">{currentTemplate.name}</span>}
-                <span className="chip">Gemini Copy</span>
+                <span className="chip">{selectedModelLabel}</span>
               </div>
             </div>
             <div className="s-right">

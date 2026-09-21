@@ -76,3 +76,5 @@ core.*
 gpucore*
 *.gpu
 
+# Logs
+logs.md

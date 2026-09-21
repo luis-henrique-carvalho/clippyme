@@ -614,6 +614,12 @@ def create_batch(batch: Union[Dict[str, Any], Any]) -> Dict[str, Any]:
             raise NotFoundError(f"Template not found: {template_id}")
         data["template_id"] = template_id
 
+        batch_model = data.get("model")
+        if batch_model and str(batch_model).strip():
+            data["model"] = str(batch_model).strip()
+        else:
+            data["model"] = None
+
         now = _utcnow_iso()
         data.setdefault("created_at", now)
         data["updated_at"] = now
@@ -640,6 +646,8 @@ def create_batch(batch: Union[Dict[str, Any], Any]) -> Dict[str, Any]:
             item["item_id"] = item_id
             item["batch_id"] = batch_id
             item["brand_id"] = brand_id
+            item_model = item.get("model") or data.get("model")
+            item["model"] = str(item_model).strip() if item_model and str(item_model).strip() else None
             item.setdefault("status", "PENDING")
             item.setdefault("source_path", None)
             item.setdefault("rendered_path", None)
@@ -762,6 +770,7 @@ def update_item(item_id: str, updates: Union[Dict[str, Any], Any]) -> Dict[str, 
                             "keyframe_urls",
                             "logs",
                             "publication_records",
+                            "model",
                         ):
                             item[k] = v
                     item["updated_at"] = _utcnow_iso()

@@ -271,22 +271,35 @@ async def process_viral_item(item_id: str) -> Dict[str, Any]:
 
             # A job retry must reuse successful analysis instead of spending
             # another AI request after a later render failure.
+            model_override = item.get("model")
+            if not model_override and batch_id:
+                batch_dict = viral_studio_store.get_batch(batch_id)
+                if batch_dict:
+                    model_override = batch_dict.get("model")
+
             copy_data = item.get("ai_copy")
             if not copy_data:
+                copy_kwargs: Dict[str, Any] = {
+                    "brand": brand_obj,
+                    "item": item_obj,
+                    "video_path": source_path,
+                }
+                if video_context is not None:
+                    copy_kwargs["video_context"] = video_context
+                if model_override:
+                    copy_kwargs["model"] = model_override
+
                 try:
-                    copy_data = await viral_studio_copy.generate_affiliate_copy(
-                        brand=brand_obj,
-                        item=item_obj,
-                        video_path=source_path,
-                        video_context=video_context,
-                    )
+                    copy_data = await viral_studio_copy.generate_affiliate_copy(**copy_kwargs)
                 except TypeError as t_err:
-                    if "video_context" in str(t_err):
-                        copy_data = await viral_studio_copy.generate_affiliate_copy(
-                            brand=brand_obj,
-                            item=item_obj,
-                            video_path=source_path,
-                        )
+                    err_msg = str(t_err)
+                    if "model" in err_msg or "video_context" in err_msg:
+                        copy_kwargs.pop("model", None)
+                        try:
+                            copy_data = await viral_studio_copy.generate_affiliate_copy(**copy_kwargs)
+                        except TypeError:
+                            copy_kwargs.pop("video_context", None)
+                            copy_data = await viral_studio_copy.generate_affiliate_copy(**copy_kwargs)
                     else:
                         raise
 
