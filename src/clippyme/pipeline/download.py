@@ -116,6 +116,10 @@ def _resolve_cookies_path(explicit: str | None) -> str | None:
     """
     if explicit:
         return explicit
+    from clippyme.domain.cookie_resolver import resolve_platform_cookies
+    resolved = resolve_platform_cookies("youtube")
+    if resolved:
+        return resolved
     repo_root_cookies = os.path.join("data", "cookies.txt")
     if os.path.exists(repo_root_cookies):
         return os.path.abspath(repo_root_cookies)

@@ -22,6 +22,12 @@ from fastapi import APIRouter, File, Header, HTTPException, Request, UploadFile
 
 from clippyme.api.schemas import ConfigUpdateRequest, ZernioConfigRequest
 from clippyme.api.security import require_trusted_config_request
+from clippyme.domain.cookie_resolver import (
+    SUPPORTED_COOKIE_PLATFORMS,
+    get_all_cookies_status,
+    get_platform_cookie_path,
+    normalize_platform_name,
+)
 from clippyme.pipeline.gemini_service import list_available_models
 from clippyme.storage.config_store import (
     load_persistent_config,
@@ -128,14 +134,18 @@ async def update_config(req: ConfigUpdateRequest, request: Request):
 COOKIES_MAX_BYTES = 10 * 1024 * 1024  # 10 MB hard cap
 
 
-@router.post("/api/config/cookies")
-async def upload_cookies(request: Request, cookies_file: UploadFile = File(...)):
-    """Upload and persist a Netscape-format cookies.txt file."""
-    require_trusted_config_request(request)
-    os.makedirs("data", exist_ok=True)
-    cookies_path = os.path.join("data", "cookies.txt")
+def _validate_cookie_content(content: bytes) -> None:
+    """Validate Netscape format: plain UTF-8 text with Netscape header or tabs."""
+    try:
+        text_head = content[:4096].decode("utf-8", errors="strict")
+    except UnicodeDecodeError:
+        raise HTTPException(status_code=400, detail="Cookies file must be UTF-8 text")
+    if "Netscape HTTP Cookie File" not in text_head and "\t" not in text_head:
+        raise HTTPException(status_code=400, detail="File does not look like a Netscape cookies.txt")
 
-    # Stream-read with hard size cap to avoid buffering arbitrary uploads in RAM.
+
+async def _read_cookie_upload(cookies_file: UploadFile) -> bytes:
+    """Stream-read upload with a hard size cap to avoid unbounded memory buffer."""
     chunks: list[bytes] = []
     total = 0
     while chunk := await cookies_file.read(64 * 1024):
@@ -144,32 +154,31 @@ async def upload_cookies(request: Request, cookies_file: UploadFile = File(...))
             raise HTTPException(status_code=413, detail="Cookies file too large (max 10 MB)")
         chunks.append(chunk)
     content = b"".join(chunks)
+    _validate_cookie_content(content)
+    return content
 
-    # Validate Netscape format: first non-comment line should mention the header
-    # or look like a tab-separated cookie row. We accept either the canonical
-    # header or a permissive check that ensures the file is plain text.
-    try:
-        text_head = content[:4096].decode("utf-8", errors="strict")
-    except UnicodeDecodeError:
-        raise HTTPException(status_code=400, detail="Cookies file must be UTF-8 text")
-    if "Netscape HTTP Cookie File" not in text_head and "\t" not in text_head:
-        raise HTTPException(status_code=400, detail="File does not look like a Netscape cookies.txt")
 
+@router.post("/api/config/cookies")
+async def upload_cookies(request: Request, cookies_file: UploadFile = File(...)):
+    """Upload and persist a Netscape-format cookies.txt file (legacy fallback)."""
+    require_trusted_config_request(request)
+    content = await _read_cookie_upload(cookies_file)
+    os.makedirs("data", exist_ok=True)
+    cookies_path = os.path.join("data", "cookies.txt")
     await asyncio.to_thread(_atomic_write_bytes, cookies_path, content, 0o600)
     return {"status": "ok", "message": "Cookies saved"}
 
 
 @router.get("/api/config/cookies/status")
 async def cookies_status(request: Request):
-    """Check if a cookies file is configured."""
+    """Check if platform and legacy cookies are configured."""
     require_trusted_config_request(request)
-    cookies_path = os.path.join("data", "cookies.txt")
-    return {"configured": await asyncio.to_thread(os.path.exists, cookies_path)}
+    return await asyncio.to_thread(get_all_cookies_status)
 
 
 @router.delete("/api/config/cookies")
 async def delete_cookies(request: Request):
-    """Remove the persisted cookies file."""
+    """Remove the persisted legacy cookies file."""
     require_trusted_config_request(request)
     cookies_path = os.path.join("data", "cookies.txt")
     try:
@@ -177,6 +186,41 @@ async def delete_cookies(request: Request):
     except FileNotFoundError:
         pass
     return {"status": "ok", "message": "Cookies removed"}
+
+
+@router.post("/api/config/cookies/{platform}")
+async def upload_platform_cookies(platform: str, request: Request, cookies_file: UploadFile = File(...)):
+    """Upload and persist platform-specific Netscape cookies.txt."""
+    require_trusted_config_request(request)
+    norm = normalize_platform_name(platform)
+    if not norm or norm not in SUPPORTED_COOKIE_PLATFORMS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unsupported platform: {platform}. Supported platforms: {', '.join(SUPPORTED_COOKIE_PLATFORMS)}",
+        )
+    content = await _read_cookie_upload(cookies_file)
+    cookie_path = get_platform_cookie_path(norm)
+    os.makedirs(os.path.dirname(cookie_path) or ".", exist_ok=True)
+    await asyncio.to_thread(_atomic_write_bytes, cookie_path, content, 0o600)
+    return {"status": "ok", "message": f"{norm.capitalize()} cookies saved", "platform": norm}
+
+
+@router.delete("/api/config/cookies/{platform}")
+async def delete_platform_cookies(platform: str, request: Request):
+    """Remove the platform-specific persisted cookies file."""
+    require_trusted_config_request(request)
+    norm = normalize_platform_name(platform)
+    if not norm or norm not in SUPPORTED_COOKIE_PLATFORMS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unsupported platform: {platform}. Supported platforms: {', '.join(SUPPORTED_COOKIE_PLATFORMS)}",
+        )
+    cookie_path = get_platform_cookie_path(norm)
+    try:
+        await asyncio.to_thread(os.remove, cookie_path)
+    except FileNotFoundError:
+        pass
+    return {"status": "ok", "message": f"{norm.capitalize()} cookies removed", "platform": norm}
 
 
 FONT_MAX_BYTES = 20 * 1024 * 1024  # 20 MB hard cap per face

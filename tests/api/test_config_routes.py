@@ -111,19 +111,57 @@ def test_models_lists_via_provided_key(client, monkeypatch):
 # --- cookies ----------------------------------------------------------------
 
 def test_cookies_upload_status_delete(client):
-    assert client.get("/api/config/cookies/status").json() == {"configured": False}
+    assert client.get("/api/config/cookies/status").json() == {
+        "youtube": False,
+        "instagram": False,
+        "tiktok": False,
+        "legacy": False,
+        "configured": False,
+    }
 
+    # Legacy upload
     r = client.post("/api/config/cookies", files={"cookies_file": ("cookies.txt", NETSCAPE_COOKIES)})
     assert r.status_code == 200
-    assert client.get("/api/config/cookies/status").json() == {"configured": True}
+    status = client.get("/api/config/cookies/status").json()
+    assert status["legacy"] is True
+    assert status["configured"] is True
 
+    # Legacy delete
     assert client.request("DELETE", "/api/config/cookies").status_code == 200
-    assert client.get("/api/config/cookies/status").json() == {"configured": False}
+    assert client.get("/api/config/cookies/status").json()["configured"] is False
+
+
+def test_platform_cookies_upload_status_delete(client):
+    # Upload YouTube cookies
+    r = client.post("/api/config/cookies/youtube", files={"cookies_file": ("youtube.txt", NETSCAPE_COOKIES)})
+    assert r.status_code == 200
+    assert r.json()["platform"] == "youtube"
+
+    # Status check
+    status = client.get("/api/config/cookies/status").json()
+    assert status["youtube"] is True
+    assert status["instagram"] is False
+    assert status["tiktok"] is False
+    assert status["configured"] is True
+
+    # Delete YouTube cookies
+    r_del = client.request("DELETE", "/api/config/cookies/youtube")
+    assert r_del.status_code == 200
+    assert client.get("/api/config/cookies/status").json()["youtube"] is False
+
+
+def test_platform_cookies_rejects_unsupported_platform(client):
+    r = client.post("/api/config/cookies/unsupported", files={"cookies_file": ("c.txt", NETSCAPE_COOKIES)})
+    assert r.status_code == 400
+    r_del = client.request("DELETE", "/api/config/cookies/unsupported")
+    assert r_del.status_code == 400
 
 
 def test_cookies_reject_non_netscape(client):
     r = client.post("/api/config/cookies", files={"cookies_file": ("c.txt", b"just some random text no tabs")})
     assert r.status_code == 400
+    r_plat = client.post("/api/config/cookies/tiktok", files={"cookies_file": ("c.txt", b"just some random text no tabs")})
+    assert r_plat.status_code == 400
 
 
 def test_cookies_reject_non_utf8(client):

@@ -2,10 +2,11 @@
 // real backend (history list/restore/delete; config keys, cookies, Zernio).
 import { useState, useEffect, useRef } from 'react';
 import { useModalA11y } from './useModalA11y';
-import { Icon, Btn, Badge, Switch, Segmented, Panel } from './primitives';
+import { Icon, Social, Btn, Badge, Switch, Segmented, Panel } from './primitives';
 import { Hero } from './chrome';
 import {
-  getConfig, saveConfig, getModels, cookiesStatus, uploadCookies, deleteCookies,
+  getConfig, saveConfig, getModels, cookiesStatus,
+  uploadPlatformCookies, deletePlatformCookies,
   getZernio, saveZernio, discoverZernioAccounts,
   listFonts, uploadFont, deleteFont, logoStatus, uploadLogo, deleteLogo,
 } from './realApi';
@@ -131,7 +132,7 @@ export function SettingsView({ apiKey, onApiKey, cookiesConfigured, onCookiesCha
   const [zernio, setZernioState] = useState(null);
   const [zKey, setZKey] = useState('');
   const [accts, setAccts] = useState({ tiktok: '', instagram: '', youtube: '' });
-  const [cookies, setCookies] = useState(!!cookiesConfigured);
+  const [cookies, setCookies] = useState(typeof cookiesConfigured === 'object' && cookiesConfigured !== null ? cookiesConfigured : { configured: !!cookiesConfigured });
   const [logoOn, setLogoOn] = useState(false);
   const [fonts, setFonts] = useState([]);
   const [provider, setProvider] = useState('deepgram');
@@ -174,7 +175,7 @@ export function SettingsView({ apiKey, onApiKey, cookiesConfigured, onCookiesCha
   useEffect(() => {
     refreshConfig().then(loadModels);
     getZernio().then((z) => { setZernioState(z); if (z.accounts) setAccts({ tiktok: '', instagram: '', youtube: '', ...z.accounts }); }).catch(() => {});
-    cookiesStatus().then((s) => setCookies(!!s.configured)).catch(() => {});
+    cookiesStatus().then((s) => setCookies(s || {})).catch(() => {});
     logoStatus().then((s) => setLogoOn(!!s.configured)).catch(() => {});
     listFonts().then(({ fonts: f }) => setFonts(Array.isArray(f) ? f : [])).catch(() => {});
     // Mount-once bootstrap; loadModels reads the latest key via closure on call.
@@ -215,15 +216,30 @@ export function SettingsView({ apiKey, onApiKey, cookiesConfigured, onCookiesCha
     } catch { pushToast?.('error', 'Discover failed. Check the API key.'); }
   };
 
-  const onCookieFile = async (e) => {
+  const onPlatformCookieFile = async (platform, e) => {
     const f = e.target.files?.[0];
     if (!f) return;
-    try { await uploadCookies(f); setCookies(true); onCookiesChange?.(true); pushToast?.('success', 'Cookies uploaded'); }
-    catch { pushToast?.('error', 'Cookie upload failed'); }
+    try {
+      await uploadPlatformCookies(platform, f);
+      const s = await cookiesStatus();
+      setCookies(s || {});
+      onCookiesChange?.(!!s?.configured);
+      pushToast?.('success', `${platform.charAt(0).toUpperCase() + platform.slice(1)} cookies uploaded`);
+    } catch {
+      pushToast?.('error', `Cookie upload for ${platform} failed`);
+    }
   };
-  const removeCookies = async () => {
-    try { await deleteCookies(); setCookies(false); onCookiesChange?.(false); pushToast?.('info', 'Cookies removed'); }
-    catch { pushToast?.('error', 'Remove failed'); }
+
+  const removePlatformCookies = async (platform) => {
+    try {
+      await deletePlatformCookies(platform);
+      const s = await cookiesStatus();
+      setCookies(s || {});
+      onCookiesChange?.(!!s?.configured);
+      pushToast?.('info', `${platform.charAt(0).toUpperCase() + platform.slice(1)} cookies removed`);
+    } catch {
+      pushToast?.('error', `Remove ${platform} cookies failed`);
+    }
   };
 
   const onLogoFile = async (e) => {
@@ -370,18 +386,43 @@ export function SettingsView({ apiKey, onApiKey, cookiesConfigured, onCookiesCha
         </div>
       </Panel>
 
-      <Panel title="Downloads" sub="For age- or region-restricted sources" icon="cookie">
-        <div className="opt" style={{ borderBottom: 0 }}>
-          <div className="oico"><Icon n="cookie" /></div>
-          <div className="otxt"><div className="ot">YouTube cookies</div><div className="od">{cookies ? 'Configured · restricted videos OK' : 'Not set · public videos only'}</div></div>
-          <div className="r" style={{ gap: 8 }}>
-            <label className="btn btn-secondary btn-sm" style={{ cursor: 'pointer' }}>
-              <Icon n="upload" />Upload
-              <input type="file" accept=".txt" hidden onChange={onCookieFile} />
-            </label>
-            {cookies && <Btn variant="ghost" size="sm" icon="trash-2" onClick={removeCookies}>Remove</Btn>}
-          </div>
-        </div>
+      <Panel title="Downloads & Cookies" sub="Platform-specific session cookies for age-restricted or bot-protected sources" icon="cookie">
+        {[
+          { id: 'youtube', label: 'YouTube cookies', file: 'youtube.txt' },
+          { id: 'instagram', label: 'Instagram cookies', file: 'instagram.txt' },
+          { id: 'tiktok', label: 'TikTok cookies', file: 'tiktok.txt' },
+        ].map((plat, idx, arr) => {
+          const isConfigured = !!cookies[plat.id] || (plat.id === 'youtube' && !!cookies.legacy);
+          return (
+            <div key={plat.id} className="opt" style={idx === arr.length - 1 ? { borderBottom: 0 } : {}}>
+              <div className="oico" style={{ display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+                <Social n={plat.id} size={18} />
+              </div>
+              <div className="otxt">
+                <div className="ot" style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                  <span>{plat.label}</span>
+                  <Badge tone={isConfigured ? 'teal' : 'out'}>
+                    {isConfigured ? 'Configurado' : 'Não configurado'}
+                  </Badge>
+                </div>
+                <div className="od">
+                  {isConfigured ? `Configured (data/cookies/${plat.file}) · restricted & viral media OK` : `Not set (data/cookies/${plat.file}) · public videos only`}
+                </div>
+              </div>
+              <div className="r" style={{ gap: 8 }}>
+                <label className="btn btn-secondary btn-sm" style={{ cursor: 'pointer' }} aria-label={`Upload ${plat.label}`}>
+                  <Icon n="upload" />Upload
+                  <input type="file" accept=".txt" hidden onChange={(e) => onPlatformCookieFile(plat.id, e)} />
+                </label>
+                {isConfigured && (
+                  <Btn variant="ghost" size="sm" icon="trash-2" onClick={() => removePlatformCookies(plat.id)} aria-label={`Remove ${plat.label}`}>
+                    Remove
+                  </Btn>
+                )}
+              </div>
+            </div>
+          );
+        })}
       </Panel>
     </div>
   );

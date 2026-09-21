@@ -9,6 +9,7 @@ import { Hero } from './chrome';
 import { relTime } from '../lib/relTime';
 import { LazyVideo } from './LazyVideo';
 import { ViralEditModal } from './ViralEditModal';
+import { DiscoveryPanel } from './DiscoveryPanel';
 import {
   getBrands,
   createBrand,
@@ -235,6 +236,7 @@ export function ViralStudioView({ onOpenPublish, pushToast }) {
   const [rawUrls, setRawUrls] = useState('');
   const [parsedItems, setParsedItems] = useState([]);
   const [creatingBatch, setCreatingBatch] = useState(false);
+  const [ingestionSource, setIngestionSource] = useState('url'); // 'url' | 'discovery'
 
   // Selection mode & Edit modal state
   const [selectMode, setSelectMode] = useState(false);
@@ -319,9 +321,9 @@ export function ViralStudioView({ onOpenPublish, pushToast }) {
       const match = line.match(urlPattern);
       if (match) {
         const url = match[1];
-        if (/(instagram\.com|instagr\.am|tiktok\.com)/i.test(url)) {
+        if (/(instagram\.com|instagr\.am|tiktok\.com|youtube\.com|youtu\.be)/i.test(url)) {
           newItems.push({
-            id: `temp-${idx}-${Date.now()}`,
+            id: `temp-${idx}-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
             source_url: url,
             product_code: '',
             product_url: '',
@@ -342,7 +344,7 @@ export function ViralStudioView({ onOpenPublish, pushToast }) {
 
   const handleCreateBatch = async () => {
     if (parsedItems.length === 0) {
-      pushToast?.('warn', 'Adicione pelo menos um link de Reels ou TikTok.');
+      pushToast?.('warn', 'Adicione pelo menos um vídeo para iniciar o lote.');
       return;
     }
     setCreatingBatch(true);
@@ -628,44 +630,45 @@ export function ViralStudioView({ onOpenPublish, pushToast }) {
                         }
                       }}
                     >
-                      {/* Avatar / Brand Indicator */}
-                      <div className="viral-batch-thumb" style={{ background: isFinished ? 'var(--grad-viral)' : 'var(--bg-3)' }}>
-                        {bBrand ? bBrand.name.slice(0, 2) : 'VS'}
-                      </div>
-
-                      {/* Info & Metadata */}
-                      <div className="viral-batch-info">
-                        <div className="viral-batch-title">
-                          <span>{bBrand ? bBrand.name : 'Lote Comercial'}</span>
-                          <span style={{ fontFamily: 'var(--font-mono)', fontSize: 'var(--text-xs)', color: 'var(--fg-3)', fontWeight: 400 }}>
-                            #{b.id.slice(0, 8)}
-                          </span>
-                          {bBrand?.handle && (
-                            <Badge tone="out">{bBrand.handle}</Badge>
-                          )}
+                      {/* Batch Main Info Row */}
+                      <div className="viral-batch-main">
+                        <div className="viral-batch-thumb" style={{ background: isFinished ? 'var(--grad-viral)' : 'var(--bg-3)' }}>
+                          {bBrand ? bBrand.name.slice(0, 2) : 'VS'}
                         </div>
 
-                        <div className="viral-batch-meta">
-                          <span>
-                            <Icon n="file-video" style={{ width: 12, height: 12, verticalAlign: '-1px', marginRight: 4 }} />
-                            {total} {total === 1 ? 'vídeo' : 'vídeos'}
-                          </span>
-                          <span>·</span>
-                          <span style={{ color: bReady > 0 ? 'var(--brand-teal)' : 'inherit' }}>
-                            {bReady}/{total} prontos
-                          </span>
-                          {bPublished > 0 && (
-                            <>
-                              <span>·</span>
-                              <span style={{ color: 'var(--blue-300)' }}>{bPublished} publicados</span>
-                            </>
-                          )}
-                          {b.created_at && (
-                            <>
-                              <span>·</span>
-                              <span>{relTime(b.created_at)}</span>
-                            </>
-                          )}
+                        <div className="viral-batch-info">
+                          <div className="viral-batch-title">
+                            <span>{bBrand ? bBrand.name : 'Lote Comercial'}</span>
+                            <span style={{ fontFamily: 'var(--font-mono)', fontSize: 'var(--text-xs)', color: 'var(--fg-3)', fontWeight: 400 }}>
+                              #{b.id.slice(0, 8)}
+                            </span>
+                            {bBrand?.handle && (
+                              <Badge tone="out">{bBrand.handle}</Badge>
+                            )}
+                          </div>
+
+                          <div className="viral-batch-meta">
+                            <span>
+                              <Icon n="file-video" style={{ width: 12, height: 12, verticalAlign: '-1px', marginRight: 4 }} />
+                              {total} {total === 1 ? 'vídeo' : 'vídeos'}
+                            </span>
+                            <span>·</span>
+                            <span style={{ color: bReady > 0 ? 'var(--brand-teal)' : 'inherit' }}>
+                              {bReady}/{total} prontos
+                            </span>
+                            {bPublished > 0 && (
+                              <>
+                                <span>·</span>
+                                <span style={{ color: 'var(--blue-300)' }}>{bPublished} publicados</span>
+                              </>
+                            )}
+                            {b.created_at && (
+                              <>
+                                <span>·</span>
+                                <span>{relTime(b.created_at)}</span>
+                              </>
+                            )}
+                          </div>
                         </div>
                       </div>
 
@@ -702,26 +705,32 @@ export function ViralStudioView({ onOpenPublish, pushToast }) {
       {/* ============================================================ VIEW 2: REVIEW & GALLERY */}
       {mode === 'review' && (
         <>
-          <div className="results-head">
-            <Btn
-              variant="secondary"
-              size="sm"
-              icon="arrow-left"
-              onClick={() => {
-                setMode('dashboard');
-                listBatches().then((b) => setBatches(b.batches || [])).catch(() => {});
-              }}
-            >
-              Painel de Lotes
-            </Btn>
+          <div className="viral-review-head">
+            <div className="vr-top-row">
+              <Btn
+                variant="secondary"
+                size="sm"
+                icon="arrow-left"
+                onClick={() => {
+                  setMode('dashboard');
+                  listBatches().then((b) => setBatches(b.batches || [])).catch(() => {});
+                }}
+              >
+                Painel de Lotes
+              </Btn>
 
-            <h2>{readyCount} vídeo{readyCount === 1 ? '' : 's'} pronto{readyCount === 1 ? '' : 's'}</h2>
+              <div className="vr-title-wrap">
+                <h2>{readyCount} {readyCount === 1 ? 'vídeo pronto' : 'vídeos prontos'}</h2>
+                <div className="results-sub" style={{ marginBottom: 0 }}>
+                  {currentBrand ? `${currentBrand.name} (${currentBrand.handle})` : 'Marca'} · #{activeBatchId?.slice(0, 6) || 'Lote'}
+                </div>
+              </div>
+            </div>
 
-            <div className="rh-right">
+            <div className="vr-actions-row">
               {batches.length > 1 && (
                 <select
-                  className="key-input"
-                  style={{ height: 46, width: 220, fontSize: 'var(--text-sm)' }}
+                  className="key-input vr-batch-select"
                   value={activeBatchId || ''}
                   onChange={(e) => handleOpenBatch(e.target.value)}
                 >
@@ -733,37 +742,35 @@ export function ViralStudioView({ onOpenPublish, pushToast }) {
                 </select>
               )}
 
-              <Btn
-                variant={selectMode ? 'primary' : 'secondary'}
-                icon="check-square"
-                onClick={() => {
-                  setSelectMode(!selectMode);
-                  setSelectedItemIds(new Set());
-                }}
-              >
-                {selectMode ? 'Cancelar seleção' : 'Selecionar'}
-              </Btn>
+              <div className="vr-btn-group">
+                <Btn
+                  variant={selectMode ? 'primary' : 'secondary'}
+                  icon="check-square"
+                  onClick={() => {
+                    setSelectMode(!selectMode);
+                    setSelectedItemIds(new Set());
+                  }}
+                >
+                  {selectMode ? 'Cancelar' : 'Selecionar'}
+                </Btn>
 
-              <Btn
-                variant="grad"
-                icon="sparkles"
-                disabled={approvedCount === 0}
-                onClick={() => {
-                  const approved = items.filter((it) => it.status === 'APPROVED');
-                  if (approved.length === 0) {
-                    pushToast?.('warn', 'Nenhum vídeo aprovado no lote para publicar.');
-                    return;
-                  }
-                  onOpenPublish?.(approved);
-                }}
-              >
-                Publicar aprovados ({approvedCount})
-              </Btn>
+                <Btn
+                  variant="grad"
+                  icon="sparkles"
+                  disabled={approvedCount === 0}
+                  onClick={() => {
+                    const approved = items.filter((it) => it.status === 'APPROVED');
+                    if (approved.length === 0) {
+                      pushToast?.('warn', 'Nenhum vídeo aprovado no lote para publicar.');
+                      return;
+                    }
+                    onOpenPublish?.(approved);
+                  }}
+                >
+                  Publicar ({approvedCount})
+                </Btn>
+              </div>
             </div>
-          </div>
-
-          <div className="results-sub">
-            {currentBrand ? `${currentBrand.name} (${currentBrand.handle})` : 'Marca'} · Lote #{activeBatchId?.slice(0, 8) || 'Atual'}
           </div>
 
           {/* Actionbar during select mode */}
@@ -825,7 +832,7 @@ export function ViralStudioView({ onOpenPublish, pushToast }) {
 
       {/* ============================================================ VIEW 3: CREATE BATCH (FLOW INSPIRADO NO CREATE.JSX) */}
       {mode === 'create' && (
-        <div className="container narrow fade-in" style={{ padding: 0 }}>
+        <div className="container narrow fade-in">
           <Hero
             eyebrow="Ingestão de Conteúdo · TikTok & Reels"
             line1="Links de produtos in."
@@ -836,7 +843,7 @@ export function ViralStudioView({ onOpenPublish, pushToast }) {
           <div style={{ display: 'flex', flexDirection: 'column', gap: 18 }}>
             <Panel
               title="Origem dos Vídeos"
-              sub="Cole uma ou várias URLs de Reels ou TikTok"
+              sub="Cole uma ou várias URLs de Reels ou TikTok ou busque vídeos virais"
               icon="link"
               headRight={
                 <Btn variant="ghost" size="sm" icon="arrow-left" onClick={() => setMode('dashboard')}>
@@ -844,34 +851,62 @@ export function ViralStudioView({ onOpenPublish, pushToast }) {
                 </Btn>
               }
             >
-              <div className="field">
-                <span className="field-label">
-                  <Icon n="globe" /> URLs do Instagram Reels ou TikTok · uma por linha
-                </span>
-                <div style={{ position: 'relative' }}>
-                  <textarea
-                    className="ta mono"
-                    rows={4}
-                    style={{ paddingRight: 90 }}
-                    placeholder={'https://www.instagram.com/reel/C_exemplo1\nhttps://www.tiktok.com/@perfil/video/7234567890'}
-                    value={rawUrls}
-                    onChange={(e) => setRawUrls(e.target.value)}
-                  />
-                  <button
-                    type="button"
-                    className="paste"
-                    style={{ position: 'absolute', top: 10, right: 10 }}
-                    onClick={async () => {
-                      try {
-                        const text = await navigator.clipboard.readText();
-                        if (text) setRawUrls((prev) => (prev ? `${prev}\n${text}` : text));
-                      } catch { /* clipboard blocked */ }
-                    }}
-                  >
-                    <Icon n="clipboard" />Colar
-                  </button>
+              <Segmented full value={ingestionSource} onChange={setIngestionSource}
+                options={[
+                  { id: 'url', label: 'URLs Diretas', icon: 'globe' },
+                  { id: 'discovery', label: 'Busca Viral 🔥', icon: 'search' },
+                ]} />
+              <div style={{ height: 14 }} />
+
+              {ingestionSource === 'discovery' ? (
+                <DiscoveryPanel 
+                  pushToast={pushToast} 
+                  onImportUrls={(urls) => {
+                    if (!urls || !urls.length) return;
+                    const newItems = urls.map((url, idx) => ({
+                      id: `disc-${idx}-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+                      source_url: url,
+                      product_code: '',
+                      product_url: '',
+                    }));
+                    setParsedItems((prev) => {
+                      const existing = new Set(prev.map((it) => it.source_url));
+                      const filtered = newItems.filter((it) => !existing.has(it.source_url));
+                      return [...prev, ...filtered];
+                    });
+                    pushToast?.('success', `${urls.length} vídeo(s) adicionado(s) ao lote! Pronto para gerar.`);
+                  }} 
+                />
+              ) : (
+                <div className="field">
+                  <span className="field-label">
+                    <Icon n="globe" /> URLs do YouTube Shorts, Instagram Reels ou TikTok · uma por linha
+                  </span>
+                  <div style={{ position: 'relative' }}>
+                    <textarea
+                      className="ta mono"
+                      rows={4}
+                      style={{ paddingRight: 90 }}
+                      placeholder={'https://www.youtube.com/shorts/exemplo1\nhttps://www.instagram.com/reel/C_exemplo2\nhttps://www.tiktok.com/@perfil/video/7234567890'}
+                      value={rawUrls}
+                      onChange={(e) => setRawUrls(e.target.value)}
+                    />
+                    <button
+                      type="button"
+                      className="paste"
+                      style={{ position: 'absolute', top: 10, right: 10 }}
+                      onClick={async () => {
+                        try {
+                          const text = await navigator.clipboard.readText();
+                          if (text) setRawUrls((prev) => (prev ? `${prev}\n${text}` : text));
+                        } catch { /* clipboard blocked */ }
+                      }}
+                    >
+                      <Icon n="clipboard" />Colar
+                    </button>
+                  </div>
                 </div>
-              </div>
+              )}
 
               {/* Parsed Videos List */}
               {parsedItems.length > 0 && (
@@ -890,49 +925,37 @@ export function ViralStudioView({ onOpenPublish, pushToast }) {
                     </button>
                   </div>
 
-                  <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
                     {parsedItems.map((it, idx) => (
-                      <div
-                        key={it.id}
-                        style={{
-                          display: 'flex',
-                          alignItems: 'center',
-                          gap: 12,
-                          background: 'var(--bg-3)',
-                          padding: '10px 14px',
-                          borderRadius: 'var(--r-sm)',
-                          border: '1px solid var(--line-1)',
-                        }}
-                      >
-                        <span style={{ fontFamily: 'var(--font-mono)', fontSize: 'var(--text-2xs)', color: 'var(--fg-4)', width: 20 }}>
-                          #{String(idx + 1).padStart(2, '0')}
-                        </span>
-                        <div style={{ flex: 1, minWidth: 0 }}>
-                          <div style={{ fontSize: 'var(--text-xs)', color: 'var(--fg-1)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                      <div key={it.id} className="viral-parsed-item">
+                        <div className="viral-parsed-item-top">
+                          <span className="vpi-idx">
+                            #{String(idx + 1).padStart(2, '0')}
+                          </span>
+                          <div className="vpi-url" title={it.source_url}>
                             {it.source_url}
                           </div>
+                          <button
+                            type="button"
+                            className="mini"
+                            title="Remover vídeo"
+                            aria-label="Remover vídeo da lista"
+                            onClick={() => setParsedItems((list) => list.filter((x) => x.id !== it.id))}
+                          >
+                            <Icon n="x" />
+                          </button>
                         </div>
-                        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                        <div className="viral-parsed-item-bottom">
                           <input
                             type="text"
                             placeholder="Cód. Produto"
                             className="key-input"
-                            style={{ width: 110, height: 32, fontSize: 'var(--text-2xs)' }}
                             value={it.product_code}
                             onChange={(e) => {
                               const val = e.target.value;
                               setParsedItems((list) => list.map((x) => (x.id === it.id ? { ...x, product_code: val } : x)));
                             }}
                           />
-                          <button
-                            type="button"
-                            className="mini"
-                            title="Remover vídeo"
-                            aria-label="Remover"
-                            onClick={() => setParsedItems((list) => list.filter((x) => x.id !== it.id))}
-                          >
-                            <Icon n="x" />
-                          </button>
                         </div>
                       </div>
                     ))}
@@ -1025,7 +1048,7 @@ export function ViralStudioView({ onOpenPublish, pushToast }) {
 
       {/* ============================================================ VIEW 4: BRAND MANAGER */}
       {mode === 'brands' && (
-        <div className="container narrow fade-in" style={{ padding: 0 }}>
+        <div className="container narrow fade-in">
           <Hero
             eyebrow="Identidade Comercial · Assinatura & Links"
             line1="Gerenciar"

@@ -102,7 +102,8 @@ async def enqueue_item(
     env["CLIPPYME_VIRAL_STUDIO_DIR"] = os.path.abspath(viral_studio_store.get_store_dir())
     env["CLIPPYME_OUTPUT_DIR"] = os.path.abspath(_get_output_dir())
     cmd = [
-        os.environ.get("PYTHON", os.sys.executable),
+        "python",
+        "-u",
         "-m",
         "clippyme.domain.viral_studio_orchestrator",
         "--item-id",

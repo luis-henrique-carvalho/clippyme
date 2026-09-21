@@ -21,10 +21,20 @@ import uuid
 
 import yt_dlp
 
+from clippyme.domain.cookie_resolver import normalize_platform_name, resolve_platform_cookies
 from clippyme.domain.errors import DownloadError, ValidationError
 from clippyme.netutil import resolve_host_addresses
 
 SAFE_ID_RE = re.compile(r"^[a-zA-Z0-9_-]{1,128}$")
+
+_YOUTUBE_PLAYER_CLIENT_CHAINS = [
+    ["android", "ios", "web_creator", "mweb"],
+    ["android"],
+    ["ios"],
+    ["web_creator", "mweb"],
+    ["mweb"],
+    ["tv"],
+]
 
 SUPPORTED_VIRAL_HOSTS = frozenset(
     {
@@ -38,6 +48,10 @@ SUPPORTED_VIRAL_HOSTS = frozenset(
         "m.tiktok.com",
         "vm.tiktok.com",
         "vt.tiktok.com",
+        "youtube.com",
+        "www.youtube.com",
+        "m.youtube.com",
+        "youtu.be",
     }
 )
 SOURCE_FILENAME = "source.mp4"
@@ -89,7 +103,7 @@ def validate_viral_source_url(url: str) -> str:
         or not parsed.path
         or not parsed.path.strip("/")
     ):
-        raise ValidationError("Source URL must be an official HTTPS Instagram or TikTok URL")
+        raise ValidationError("Source URL must be an official HTTPS YouTube, Instagram, or TikTok URL")
     return raw
 
 
@@ -204,11 +218,11 @@ def download_viral_video(url: str, output_path: str, timeout: int = 120) -> str:
         return str(destination)
 
     _assert_public_resolution(source_url)
-    prefix = f".viral-source-{uuid.uuid4().hex[:8]}-"
-    options: dict[str, Any] = {
+    platform = normalize_platform_name(source_url)
+    cookies_path = resolve_platform_cookies(source_url)
+
+    base_options: dict[str, Any] = {
         "format": _FORMAT_LADDER,
-        "outtmpl": str(destination.parent / f"{prefix}%(id)s.%(ext)s"),
-        "merge_output_format": "mp4",
         "noplaylist": True,
         "quiet": True,
         "no_warnings": True,
@@ -217,47 +231,93 @@ def download_viral_video(url: str, output_path: str, timeout: int = 120) -> str:
         "fragment_retries": 3,
         "overwrites": True,
         "cachedir": False,
+        "http_headers": {
+            "User-Agent": (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/124.0.0.0 Safari/537.36"
+            ),
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            "Accept-Language": "en-US,en;q=0.9,pt-BR;q=0.8,pt;q=0.7",
+            "Sec-Fetch-Mode": "navigate",
+        },
     }
-    try:
-        extracted_info = None
-        with yt_dlp.YoutubeDL(options) as downloader:
-            if hasattr(downloader, "extract_info"):
-                try:
-                    extracted_info = downloader.extract_info(source_url, download=True)
-                except Exception:
-                    downloader.download([source_url])
-            else:
-                downloader.download([source_url])
-        downloaded = _find_downloaded_file(destination.parent, prefix)
-        if downloaded is None or downloaded.stat().st_size == 0:
-            raise DownloadError("yt-dlp completed without producing a video file")
-        os.replace(downloaded, destination)
+    if cookies_path:
+        base_options["cookiefile"] = cookies_path
 
-        meta_dict = {}
-        if isinstance(extracted_info, dict):
-            meta_dict = {
-                "title": extracted_info.get("title") or "",
-                "description": extracted_info.get("description") or "",
-                "tags": extracted_info.get("tags") or [],
-                "uploader": extracted_info.get("uploader") or "",
-                "view_count": extracted_info.get("view_count") or extracted_info.get("play_count") or extracted_info.get("video_view_count"),
-                "like_count": extracted_info.get("like_count") or extracted_info.get("likes"),
-                "comment_count": extracted_info.get("comment_count") or extracted_info.get("comments"),
-                "repost_count": extracted_info.get("repost_count") or extracted_info.get("reposts") or extracted_info.get("share_count"),
-            }
-        _write_manifest(destination, source_url, metadata=meta_dict)
-        return str(destination)
-    except (ValidationError, DownloadError):
-        raise
-    except Exception as exc:
-        raise DownloadError(f"Could not download source video: {exc}") from exc
-    finally:
-        for candidate in destination.parent.glob(f"{prefix}*"):
-            if candidate.is_file():
-                try:
-                    candidate.unlink()
-                except OSError:
-                    pass
+    if platform == "youtube":
+        client_attempts: list[Optional[list[str]]] = list(_YOUTUBE_PLAYER_CLIENT_CHAINS)
+    else:
+        client_attempts = [None]
+
+    last_error: Optional[Exception] = None
+    for attempt_idx, client_config in enumerate(client_attempts, start=1):
+        prefix = f".viral-source-{uuid.uuid4().hex[:8]}-"
+        options = {
+            **base_options,
+            "outtmpl": str(destination.parent / f"{prefix}%(id)s.%(ext)s"),
+            "merge_output_format": "mp4",
+        }
+        if client_config:
+            options["extractor_args"] = {"youtube": {"player_client": client_config}}
+
+        try:
+            extracted_info = None
+            with yt_dlp.YoutubeDL(options) as downloader:
+                if hasattr(downloader, "extract_info"):
+                    try:
+                        extracted_info = downloader.extract_info(source_url, download=True)
+                    except Exception:
+                        downloader.download([source_url])
+                else:
+                    downloader.download([source_url])
+            downloaded = _find_downloaded_file(destination.parent, prefix)
+            if downloaded is None or downloaded.stat().st_size == 0:
+                raise DownloadError("yt-dlp completed without producing a video file")
+            os.replace(downloaded, destination)
+
+            meta_dict = {}
+            if isinstance(extracted_info, dict):
+                meta_dict = {
+                    "title": extracted_info.get("title") or "",
+                    "description": extracted_info.get("description") or "",
+                    "tags": extracted_info.get("tags") or [],
+                    "uploader": extracted_info.get("uploader") or "",
+                    "view_count": extracted_info.get("view_count") or extracted_info.get("play_count") or extracted_info.get("video_view_count"),
+                    "like_count": extracted_info.get("like_count") or extracted_info.get("likes"),
+                    "comment_count": extracted_info.get("comment_count") or extracted_info.get("comments"),
+                    "repost_count": extracted_info.get("repost_count") or extracted_info.get("reposts") or extracted_info.get("share_count"),
+                }
+            _write_manifest(destination, source_url, metadata=meta_dict)
+            return str(destination)
+        except ValidationError:
+            raise
+        except DownloadError as exc:
+            last_error = exc
+            if "completed without producing a video file" in str(exc) and attempt_idx < len(client_attempts):
+                continue
+            if attempt_idx >= len(client_attempts):
+                raise
+        except Exception as exc:
+            last_error = exc
+            err_msg = str(exc).lower()
+            if ("403" in err_msg or "forbidden" in err_msg or "format" in err_msg) and attempt_idx < len(client_attempts):
+                continue
+            if attempt_idx >= len(client_attempts):
+                raise DownloadError(f"Could not download source video: {exc}") from exc
+        finally:
+            for candidate in destination.parent.glob(f"{prefix}*"):
+                if candidate.is_file():
+                    try:
+                        candidate.unlink()
+                    except OSError:
+                        pass
+
+    if last_error:
+        if isinstance(last_error, (ValidationError, DownloadError)):
+            raise last_error
+        raise DownloadError(f"Could not download source video: {last_error}") from last_error
+    raise DownloadError("yt-dlp completed without producing a video file")
 
 
 def preserve_uploaded_source(upload_path: str, output_path: str) -> str:

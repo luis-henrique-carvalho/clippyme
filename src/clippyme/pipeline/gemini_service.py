@@ -5,7 +5,7 @@ from typing import List, Optional
 from google import genai
 from google.genai import types as genai_types
 
-ALLOWED_MODEL_PREFIXES = ("gemini-2.5-", "gemini-3")
+ALLOWED_MODEL_PREFIXES = ("gemini-2.0-", "gemini-2.5-", "gemini-3")
 
 # models.list() serves the Settings UI synchronously — an unbounded call
 # against a hung endpoint would pin the request thread forever. Milliseconds.

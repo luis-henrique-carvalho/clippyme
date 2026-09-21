@@ -3,7 +3,9 @@ import asyncio
 import glob
 import logging
 import os
+import shutil
 import subprocess
+import sys
 import threading
 
 from clippyme.domain import job_control
@@ -21,6 +23,26 @@ from clippyme.domain.runtime_state import (
 from clippyme.storage.config_store import load_persistent_config
 
 logger = logging.getLogger("clippyme")
+
+
+def normalize_command_executable(cmd: list[str]) -> list[str]:
+    """Ensure the command executable exists in the current environment or fallback safely."""
+    if not cmd:
+        return cmd
+    normalized = list(cmd)
+    first = normalized[0]
+    if ("/" in first or "\\" in first) and not (os.path.exists(first) and os.access(first, os.X_OK)):
+        basename = os.path.basename(first).lower()
+        if "python" in basename:
+            if sys.executable and os.path.exists(sys.executable) and os.access(sys.executable, os.X_OK):
+                normalized[0] = sys.executable
+            else:
+                normalized[0] = shutil.which("python3") or shutil.which("python") or "python"
+        else:
+            resolved = shutil.which(os.path.basename(first))
+            if resolved:
+                normalized[0] = resolved
+    return normalized
 
 
 def merge_persistent_config(env: dict, persisted: dict | None) -> dict:
@@ -137,7 +159,7 @@ def make_run_job(*, jobs: dict, output_root: str, on_change=None):
 
     async def run_job(job_id, job_data):
         """Execute a checkpointed subprocess, retrying transient failures."""
-        cmd = list(job_data["cmd"])
+        cmd = normalize_command_executable(list(job_data["cmd"]))
         env = dict(job_data["env"])
         output_dir = job_data["output_dir"]
         process = None

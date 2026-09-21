@@ -35,6 +35,7 @@ from clippyme.domain.compose import compose_layers
 from clippyme.domain.reframe_service import run_reframe
 from clippyme.domain.errors import ClippyMeError
 from clippyme.domain.uploads import stream_upload_within_limit, FileTooLarge
+from clippyme.domain.cookie_resolver import resolve_platform_cookies
 from clippyme.domain.clip_endpoints import run_smart_cut, restore_job_from_disk
 from clippyme.domain.clip_resolve import resolve_clip
 from clippyme.domain import job_control
@@ -70,6 +71,7 @@ from clippyme.domain.job_worker import make_workers
 from clippyme.domain.history_service import scan_history, is_valid_job_id
 from clippyme.api.config_routes import router as config_router
 from clippyme.api.viral_studio_routes import router as viral_studio_router
+from clippyme.api.discovery_routes import router as discovery_router
 
 
 load_dotenv()
@@ -288,6 +290,7 @@ app.mount("/fonts", StaticFiles(directory="fonts"), name="fonts")
 # app.py lets this module stay focused on the job lifecycle.
 app.include_router(config_router)
 app.include_router(viral_studio_router, prefix="/api/viral-studio")
+app.include_router(discovery_router)
 
 
 
@@ -432,7 +435,7 @@ async def process_endpoint(
             reframe_mode=reframe_mode,
             letterbox_zoom=letterbox_zoom,
             aspect=aspect,
-            cookies_path=os.path.join("data", "cookies.txt"),
+            cookies_path=resolve_platform_cookies(url),
             language=language,
             no_zoom=no_zoom,
             skip_analysis=skip_analysis,
@@ -486,7 +489,7 @@ async def batch_process(req: BatchRequest, request: Request):
                 reframe_mode=req.reframe_mode,
                 letterbox_zoom=req.letterbox_zoom,
                 aspect=getattr(req, "aspect", None),
-                cookies_path=os.path.join("data", "cookies.txt"),
+                cookies_path=resolve_platform_cookies(url),
                 language=getattr(req, "language", None),
                 no_zoom=bool(getattr(req, "no_zoom", False)),
                 skip_analysis=bool(getattr(req, "skip_analysis", False)),

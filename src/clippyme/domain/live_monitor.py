@@ -1199,7 +1199,8 @@ class LiveMonitor:
         from clippyme.domain.job_submission import submit_job
 
         job_id, job_dir, env = self._new_job_dir()
-        cookies_path = os.path.join("data", "cookies.txt")
+        from clippyme.domain.cookie_resolver import resolve_platform_cookies
+        cookies_path = resolve_platform_cookies(url)
         cmd = build_main_cmd(url=url, output_dir=job_dir, cookies_path=cookies_path,
                              reframe_mode="disabled",
                              letterbox_zoom=self.cfg.get("letterbox_zoom") or 0,

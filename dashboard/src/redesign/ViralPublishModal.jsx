@@ -1,6 +1,5 @@
-// ClippyMe redesign — ViralPublishModal: concurrent publish for Viral Studio items.
-// Reuses Zernio platforms mapping, LazyVideo, and localDatePlus from the redesign UI.
 import { useState, useEffect, useRef } from 'react';
+import { createPortal } from 'react-dom';
 import { Icon, Social, Btn, Switch, PlatPill } from './primitives';
 import { LazyVideo } from './LazyVideo';
 import { getZernio } from './realApi';
@@ -114,66 +113,69 @@ export function ViralPublishModal({ items = [], onClose, onPublished, pushToast 
     }
   };
 
-  return (
-    <div className="modal-backdrop" onClick={onClose} role="presentation">
-      <div className="modal modal-pub" ref={panelRef} onClick={(e) => e.stopPropagation()}
+  return createPortal(
+    <div className="overlay" onClick={(e) => { if (e.target === e.currentTarget) onClose(); }} role="presentation">
+      <div className="modal wide" ref={panelRef}
         role="dialog" aria-modal="true" aria-labelledby="viral-pub-modal-title">
-        <div className="mhead">
-          <div className="mhead-txt">
-            <h2 id="viral-pub-modal-title">{all ? `Publicar lote (${items.length} vídeos)` : 'Publicar vídeo'}</h2>
-            <div className="msub">
+        <div className="modal-head">
+          <div>
+            <h3 id="viral-pub-modal-title">{all ? `Publicar lote (${items.length} vídeos)` : 'Publicar vídeo'}</h3>
+            <div className="mh-sub">
               {stage === 'uploading' ? 'Publicando via Zernio…'
                 : stage === 'done' ? 'Publicação concluída!'
                 : 'Envie para suas redes sociais vinculadas'}
             </div>
           </div>
-          <button type="button" className="mclose" onClick={onClose} aria-label="Fechar modal"><Icon n="x" /></button>
+          <button type="button" className="x" onClick={onClose} aria-label="Fechar modal"><Icon n="x" /></button>
         </div>
 
-        <div className="mbody">
+        <div className="modal-body">
           {stage === 'setup' && (
             <>
-              <div className="pub-section">
-                <div className="pub-lbl">Plataformas de destino</div>
-                <div className="plat-pick">
+              <div className="field">
+                <span className="field-label">Plataformas de destino</span>
+                <div className="plats" style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
                   {Object.keys(PLAT).map((k) => (
                     <PlatPill key={k} id={k} on={plats[k]} toggle={() => toggle(k)}
                       connected={!!accounts[PLAT[k].acct]} />
                   ))}
                 </div>
                 {!zernio?.configured && (
-                  <div className="pub-warn">
+                  <div className="empty" style={{ padding: '12px', marginTop: '8px', fontSize: 'var(--text-xs)' }}>
                     <Icon n="triangle-alert" /> Zernio não está configurado. Conecte sua chave nas Configurações.
                   </div>
                 )}
               </div>
 
-              <div className="pub-section">
-                <div className="pub-opt-row">
-                  <div>
-                    <div className="opt-title">Agendar postagens</div>
-                    <div className="opt-desc">Distribui as postagens (1 vídeo por dia) para evitar bloqueio</div>
-                  </div>
-                  <Switch on={schedule} onChange={setSchedule} label="Agendar postagens" />
+              <div className="opt" style={{ borderBottom: 0, margin: '8px 0' }}>
+                <div className="oico"><Icon n="calendar-clock" /></div>
+                <div className="otxt">
+                  <div className="ot">Agendar postagens</div>
+                  <div className="od">Distribui as postagens (1 vídeo por dia) para evitar bloqueio</div>
                 </div>
+                <div className="r"><Switch on={schedule} onChange={setSchedule} label="Agendar postagens" /></div>
               </div>
             </>
           )}
 
-          <div className="pub-list" style={{ maxHeight: 280, overflowY: 'auto' }}>
+          <div className="pubgrid" style={{ maxHeight: 280, overflowY: 'auto' }}>
             {items.map((item, idx) => (
               <ViralPubRow key={item.id} item={item} idx={idx} st={progress[item.id] || (stage === 'setup' ? 'queued' : 'uploading')} plats={plats} />
             ))}
           </div>
         </div>
 
-        <div className="mfoot">
-          <Btn variant="secondary" onClick={onClose} disabled={stage === 'uploading'}>Cancelar</Btn>
-          <Btn variant="grad" onClick={handlePublish} disabled={!ready || stage !== 'setup'} loading={stage === 'uploading'}>
-            {stage === 'uploading' ? 'Publicando…' : schedule ? 'Agendar publicação' : 'Publicar agora'}
-          </Btn>
+        <div className="modal-foot">
+          <Btn variant="ghost" onClick={onClose} disabled={stage === 'uploading'}>Cancelar</Btn>
+          <div className="mf-right">
+            <Btn variant="grad" onClick={handlePublish} disabled={!ready || stage !== 'setup'} loading={stage === 'uploading'}>
+              {stage === 'uploading' ? 'Publicando…' : schedule ? 'Agendar publicação' : 'Publicar agora'}
+            </Btn>
+          </div>
         </div>
       </div>
-    </div>
+    </div>,
+    document.body
   );
 }
+

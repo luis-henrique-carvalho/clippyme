@@ -129,3 +129,22 @@ def test_viral_studio_job_completes_without_pipeline_metadata(monkeypatch, tmp_p
 
     asyncio.run(module.make_run_job(jobs=jobs, output_root=str(tmp_path))("viral", jobs["viral"]))
     assert jobs["viral"]["status"] == "completed"
+
+
+def test_normalize_command_executable_replaces_nonexistent_python_path(monkeypatch):
+    from clippyme.domain.job_runner import normalize_command_executable
+
+    nonexistent_path = "/nonexistent/path/to/venv/bin/python"
+    cmd = [nonexistent_path, "-m", "clippyme.domain.viral_studio_orchestrator", "--item-id", "123"]
+    normalized = normalize_command_executable(cmd)
+    assert normalized[0] != nonexistent_path
+    assert "python" in normalized[0].lower()
+    assert normalized[1:] == cmd[1:]
+
+
+def test_normalize_command_executable_preserves_valid_command():
+    from clippyme.domain.job_runner import normalize_command_executable
+
+    cmd = ["python", "-u", "-m", "module"]
+    assert normalize_command_executable(cmd) == cmd
+

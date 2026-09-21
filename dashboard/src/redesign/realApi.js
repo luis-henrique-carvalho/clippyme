@@ -239,7 +239,7 @@ export async function getModels(apiKey) {
 
 export async function cookiesStatus() {
   const res = await apiFetch(getApiUrl('/api/config/cookies/status'));
-  if (!res.ok) return { configured: false };
+  if (!res.ok) return { configured: false, youtube: false, instagram: false, tiktok: false, legacy: false };
   return res.json();
 }
 
@@ -251,9 +251,23 @@ export async function uploadCookies(file) {
   return res.json().catch(() => ({}));
 }
 
+export async function uploadPlatformCookies(platform, file) {
+  const fd = new FormData();
+  fd.append('cookies_file', file);
+  const res = await apiFetch(getApiUrl(`/api/config/cookies/${platform}`), { method: 'POST', body: fd });
+  if (!res.ok) throw new Error(`${platform} cookie upload failed`);
+  return res.json().catch(() => ({}));
+}
+
 export async function deleteCookies() {
   const res = await apiFetch(getApiUrl('/api/config/cookies'), { method: 'DELETE' });
   if (!res.ok) throw new Error('Cookie remove failed');
+  return res.json().catch(() => ({}));
+}
+
+export async function deletePlatformCookies(platform) {
+  const res = await apiFetch(getApiUrl(`/api/config/cookies/${platform}`), { method: 'DELETE' });
+  if (!res.ok) throw new Error(`${platform} cookie remove failed`);
   return res.json().catch(() => ({}));
 }
 

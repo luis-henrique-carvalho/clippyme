@@ -498,7 +498,7 @@ def test_create_batch_invalid_url_rejected(api_client):
         "/api/viral-studio/batches",
         json={
             "brand_id": "bad-url-brand",
-            "items": [{"source_url": "https://youtube.com/watch?v=12345"}],
+            "items": [{"source_url": "https://vimeo.com/12345"}],
         },
     )
     assert resp.status_code in (400, 422)

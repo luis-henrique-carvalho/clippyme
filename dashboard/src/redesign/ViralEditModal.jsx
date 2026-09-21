@@ -3,7 +3,8 @@
 // - Left: 9:16 vertical video preview.
 // - Right: Clean tabs (Headlines · Legenda · Detalhes · Observabilidade & IA).
 // Observability Hub: Sinais Extraídos (Keyframes gallery + Transcription + Original Metadata), Telemetria da LLM (Metrics, Prompt, Raw Response), Linha do Tempo (Terminal Logs).
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
+import { createPortal } from 'react-dom';
 import { Icon, Btn } from './primitives';
 import { useModalA11y } from './useModalA11y';
 import { viralVideoSrc } from './viralApi';
@@ -18,6 +19,14 @@ export function ViralEditModal({ item, brand, template, onClose, onSave, onReRen
     }
   };
   const panelRef = useModalA11y(handleModalClose);
+
+  useEffect(() => {
+    const origOverflow = document.body.style.overflow;
+    document.body.style.overflow = 'hidden';
+    return () => {
+      document.body.style.overflow = origOverflow;
+    };
+  }, []);
   const isBusyOrFailed = ['PENDING', 'DOWNLOADING', 'ANALYZING', 'RENDERING', 'FAILED'].includes(item.status);
   const [tab, setTab] = useState(isBusyOrFailed ? 'observability' : 'headlines'); // 'headlines' | 'caption' | 'details' | 'observability' | 'logs'
   const [obsSubTab, setObsSubTab] = useState('signals'); // 'signals' | 'telemetry' | 'timeline'
@@ -132,16 +141,15 @@ export function ViralEditModal({ item, brand, template, onClose, onSave, onReRen
 
   const isObsTab = tab === 'observability' || tab === 'logs';
 
-  return (
+  return createPortal(
     <div className="overlay" onClick={onClose} role="presentation">
       <div
-        className="modal wide"
+        className="modal wide viral-edit-modal"
         ref={panelRef}
         onClick={(e) => e.stopPropagation()}
         role="dialog"
         aria-modal="true"
         aria-labelledby="viral-edit-title"
-        style={{ maxWidth: 880 }}
       >
         <div className="modal-head">
           <Icon n="sliders-horizontal" />
@@ -156,11 +164,11 @@ export function ViralEditModal({ item, brand, template, onClose, onSave, onReRen
           </button>
         </div>
 
-        <div className="modal-body" style={{ padding: '18px 24px' }}>
-          <div className="edit-grid" style={{ gridTemplateColumns: '260px 1fr', gap: 24 }}>
+        <div className="modal-body">
+          <div className="viral-edit-grid">
             {/* Left: 9:16 Video Preview */}
-            <div>
-              <div style={{ aspectRatio: '9/16', background: '#000', borderRadius: 'var(--r-md)', overflow: 'hidden', border: '1px solid var(--line-1)', position: 'relative' }}>
+            <div className="viral-edit-preview-col">
+              <div className="viral-edit-preview">
                 {item.rendered_path ? (
                   <video
                     src={videoUrl}
@@ -175,7 +183,7 @@ export function ViralEditModal({ item, brand, template, onClose, onSave, onReRen
                   </div>
                 )}
               </div>
-              <div style={{ marginTop: 12, display: 'flex', flexDirection: 'column', gap: 8 }}>
+              <div className="viral-edit-preview-actions">
                 <Btn
                   variant="secondary"
                   size="sm"
@@ -190,7 +198,7 @@ export function ViralEditModal({ item, brand, template, onClose, onSave, onReRen
             </div>
 
             {/* Right: Tabbed Controls */}
-            <div>
+            <div className="viral-edit-tabs-col">
               {item.error_message && (
                 <div style={{ background: 'rgba(239, 68, 68, 0.12)', border: '1px solid rgba(239, 68, 68, 0.3)', borderRadius: 'var(--r-sm)', padding: '10px 14px', marginBottom: 14, color: '#fca5a5', fontSize: 'var(--text-xs)', display: 'flex', alignItems: 'flex-start', gap: 10 }}>
                   <Icon n="alert-triangle" style={{ flexShrink: 0, marginTop: 2 }} />
@@ -286,7 +294,7 @@ export function ViralEditModal({ item, brand, template, onClose, onSave, onReRen
                               transition: 'border-color .15s, background .15s',
                             }}
                           >
-                            <span>{h}</span>
+                            <span style={{ flex: 1, minWidth: 0, wordBreak: 'break-word', paddingRight: 8 }}>{h}</span>
                             {isSelected && <Icon n="check" style={{ color: 'var(--brand-blue)', width: 16, height: 16, flexShrink: 0 }} />}
                           </div>
                         );
@@ -392,14 +400,7 @@ export function ViralEditModal({ item, brand, template, onClose, onSave, onReRen
                 <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
                   {/* Observability Sub-tabs Switcher */}
                   <div
-                    style={{
-                      display: 'flex',
-                      gap: 4,
-                      background: 'var(--bg-2)',
-                      padding: 4,
-                      borderRadius: 'var(--r-md)',
-                      border: '1px solid var(--line-1)',
-                    }}
+                    className="viral-obs-subtabs"
                     role="tablist"
                     aria-label="Subseções de Observabilidade"
                   >
@@ -408,22 +409,7 @@ export function ViralEditModal({ item, brand, template, onClose, onSave, onReRen
                       role="tab"
                       aria-selected={obsSubTab === 'signals'}
                       onClick={() => setObsSubTab('signals')}
-                      style={{
-                        flex: 1,
-                        display: 'inline-flex',
-                        alignItems: 'center',
-                        justifyContent: 'center',
-                        gap: 6,
-                        padding: '6px 10px',
-                        borderRadius: 'var(--r-sm)',
-                        fontSize: 'var(--text-xs)',
-                        fontWeight: obsSubTab === 'signals' ? 600 : 500,
-                        color: obsSubTab === 'signals' ? 'var(--fg-1)' : 'var(--fg-3)',
-                        background: obsSubTab === 'signals' ? 'var(--bg-1)' : 'transparent',
-                        border: obsSubTab === 'signals' ? '1px solid var(--line-1)' : '1px solid transparent',
-                        cursor: 'pointer',
-                        transition: 'all .15s ease',
-                      }}
+                      className={`viral-obs-subtab-btn ${obsSubTab === 'signals' ? 'active' : ''}`}
                     >
                       <Icon n="sparkles" style={{ width: 14, height: 14, color: 'var(--brand-teal, #34d399)' }} />
                       <span>Sinais Extraídos</span>
@@ -433,22 +419,7 @@ export function ViralEditModal({ item, brand, template, onClose, onSave, onReRen
                       role="tab"
                       aria-selected={obsSubTab === 'telemetry'}
                       onClick={() => setObsSubTab('telemetry')}
-                      style={{
-                        flex: 1,
-                        display: 'inline-flex',
-                        alignItems: 'center',
-                        justifyContent: 'center',
-                        gap: 6,
-                        padding: '6px 10px',
-                        borderRadius: 'var(--r-sm)',
-                        fontSize: 'var(--text-xs)',
-                        fontWeight: obsSubTab === 'telemetry' ? 600 : 500,
-                        color: obsSubTab === 'telemetry' ? 'var(--fg-1)' : 'var(--fg-3)',
-                        background: obsSubTab === 'telemetry' ? 'var(--bg-1)' : 'transparent',
-                        border: obsSubTab === 'telemetry' ? '1px solid var(--line-1)' : '1px solid transparent',
-                        cursor: 'pointer',
-                        transition: 'all .15s ease',
-                      }}
+                      className={`viral-obs-subtab-btn ${obsSubTab === 'telemetry' ? 'active' : ''}`}
                     >
                       <Icon n="activity" style={{ width: 14, height: 14, color: 'var(--blue-400, #60a5fa)' }} />
                       <span>Telemetria da LLM</span>
@@ -458,22 +429,7 @@ export function ViralEditModal({ item, brand, template, onClose, onSave, onReRen
                       role="tab"
                       aria-selected={obsSubTab === 'timeline'}
                       onClick={() => setObsSubTab('timeline')}
-                      style={{
-                        flex: 1,
-                        display: 'inline-flex',
-                        alignItems: 'center',
-                        justifyContent: 'center',
-                        gap: 6,
-                        padding: '6px 10px',
-                        borderRadius: 'var(--r-sm)',
-                        fontSize: 'var(--text-xs)',
-                        fontWeight: obsSubTab === 'timeline' ? 600 : 500,
-                        color: obsSubTab === 'timeline' ? 'var(--fg-1)' : 'var(--fg-3)',
-                        background: obsSubTab === 'timeline' ? 'var(--bg-1)' : 'transparent',
-                        border: obsSubTab === 'timeline' ? '1px solid var(--line-1)' : '1px solid transparent',
-                        cursor: 'pointer',
-                        transition: 'all .15s ease',
-                      }}
+                      className={`viral-obs-subtab-btn ${obsSubTab === 'timeline' ? 'active' : ''}`}
                     >
                       <Icon n="terminal" style={{ width: 14, height: 14, color: 'var(--brand-amber, #fbbf24)' }} />
                       <span>Linha do Tempo</span>
@@ -496,7 +452,7 @@ export function ViralEditModal({ item, brand, template, onClose, onSave, onReRen
                         </div>
 
                         {keyframeUrls.length > 0 ? (
-                          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(105px, 1fr))', gap: 10 }}>
+                          <div className="viral-keyframes-grid">
                             {keyframeUrls.map((url, idx) => (
                               <div
                                 key={idx}
@@ -668,7 +624,7 @@ export function ViralEditModal({ item, brand, template, onClose, onSave, onReRen
                   {obsSubTab === 'telemetry' && (
                     <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
                       {/* 6 Metric Stat Cards */}
-                      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 8 }}>
+                      <div className="viral-obs-metrics-grid">
                         <div style={{ background: 'var(--bg-2)', border: '1px solid var(--line-1)', borderRadius: 'var(--r-sm)', padding: '8px 12px' }}>
                           <span style={{ fontSize: 'var(--text-3xs)', color: 'var(--fg-3)', textTransform: 'uppercase', fontWeight: 600, display: 'block', marginBottom: 2 }}>Modelo</span>
                           <span style={{ fontSize: 'var(--text-xs)', fontWeight: 600, color: 'var(--blue-400, #60a5fa)', wordBreak: 'break-all' }}>{modelUsed}</span>
@@ -895,6 +851,8 @@ export function ViralEditModal({ item, brand, template, onClose, onSave, onReRen
           </div>
         </div>
       </div>
-    </div>
+    </div>,
+    document.body
   );
 }
+

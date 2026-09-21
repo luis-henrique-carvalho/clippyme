@@ -14,7 +14,7 @@ from clippyme.domain.errors import DownloadError, ValidationError
     [
         "http://www.instagram.com/reel/abc/",
         "https://instagram.com.evil.test/reel/abc/",
-        "https://www.youtube.com/watch?v=abc",
+        "https://vimeo.com/12345",
         "https://user:pass@www.tiktok.com/@user/video/1",
         "file:///etc/passwd",
     ],
@@ -32,6 +32,8 @@ def test_validate_viral_source_url_rejects_untrusted_urls(url):
         "https://www.instagr.am/reel/abc/",
         "https://www.tiktok.com/@creator/video/123",
         "https://vm.tiktok.com/short-code/",
+        "https://www.youtube.com/shorts/abc123xyz",
+        "https://youtu.be/abc123xyz",
     ],
 )
 def test_validate_viral_source_url_accepts_supported_platforms(url):
@@ -123,8 +125,6 @@ def test_download_wraps_ytdlp_failure(tmp_path, monkeypatch):
 @pytest.mark.parametrize(
     "bad_url",
     [
-        "https://youtube.com/watch?v=12345",
-        "https://www.youtube.com/shorts/12345",
         "https://facebook.com/reel/12345",
         "https://twitter.com/i/status/12345",
         "https://vimeo.com/12345",
@@ -133,10 +133,10 @@ def test_download_wraps_ytdlp_failure(tmp_path, monkeypatch):
     ],
 )
 def test_download_rejects_non_allowlisted_domains(bad_url, tmp_path):
-    """Rejects domains not in the allowlist (instagram.com, instagr.am, tiktok.com, vm.tiktok.com)."""
+    """Rejects domains not in the allowlist."""
     with pytest.raises(ValidationError) as exc_info:
         downloader.download_viral_video(bad_url, str(tmp_path / "source.mp4"))
-    assert "source url must be an official https instagram or tiktok url" in str(exc_info.value).lower()
+    assert "source url must be an official https youtube, instagram, or tiktok url" in str(exc_info.value).lower()
 
 
 @pytest.mark.parametrize(
@@ -553,5 +553,82 @@ def test_process_batch_downloads_advances_batch_status(tmp_path, monkeypatch):
     b_fail_id = batch_fail["id"]
     res_fail = downloader.process_batch_downloads(b_fail_id, base_dir=str(tmp_path))
     assert res_fail["status"] == "FAILED"
+
+
+def test_download_injects_platform_cookies(tmp_path, monkeypatch):
+    """Verifies that platform cookies are resolved and passed to YoutubeDL options."""
+    cookies_dir = tmp_path / "data" / "cookies"
+    cookies_dir.mkdir(parents=True, exist_ok=True)
+    yt_cookie = cookies_dir / "youtube.txt"
+    yt_cookie.write_text("# Netscape HTTP Cookie File\n")
+
+    captured_options = []
+
+    class FakeDL:
+        def __init__(self, options):
+            self.options = options
+            captured_options.append(options)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def download(self, _urls):
+            outtmpl = self.options["outtmpl"]
+            actual = Path(outtmpl.replace("%(id)s", "yt_vid").replace("%(ext)s", "mp4"))
+            actual.parent.mkdir(parents=True, exist_ok=True)
+            actual.write_bytes(b"yt_video_bytes")
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(downloader, "_assert_public_resolution", lambda _url: None)
+    monkeypatch.setattr(downloader.yt_dlp, "YoutubeDL", FakeDL)
+
+    dest = str(tmp_path / "source.mp4")
+    downloader.download_viral_video("https://www.youtube.com/shorts/0vO_Fo6-lCQ", dest)
+
+    assert len(captured_options) >= 1
+    assert "cookiefile" in captured_options[0]
+    assert captured_options[0]["cookiefile"].endswith("youtube.txt")
+    assert captured_options[0]["extractor_args"] == {
+        "youtube": {"player_client": ["android", "ios", "web_creator", "mweb"]}
+    }
+
+
+def test_download_youtube_403_fallback_loop_succeeds(tmp_path, monkeypatch):
+    """When attempt 1 fails with 403 Forbidden, attempt 2 with alternate player_client succeeds."""
+    attempts = []
+
+    class FallbackYoutubeDL:
+        def __init__(self, options):
+            self.options = options
+            attempts.append(options.get("extractor_args"))
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def download(self, _urls):
+            if len(attempts) == 1:
+                raise RuntimeError("HTTP Error 403: Forbidden")
+            outtmpl = self.options["outtmpl"]
+            actual = Path(outtmpl.replace("%(id)s", "yt_vid").replace("%(ext)s", "mp4"))
+            actual.parent.mkdir(parents=True, exist_ok=True)
+            actual.write_bytes(b"downloaded_on_retry")
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(downloader, "_assert_public_resolution", lambda _url: None)
+    monkeypatch.setattr(downloader.yt_dlp, "YoutubeDL", FallbackYoutubeDL)
+
+    dest = str(tmp_path / "source.mp4")
+    res = downloader.download_viral_video("https://www.youtube.com/shorts/0vO_Fo6-lCQ", dest)
+
+    assert res == dest
+    assert Path(dest).read_bytes() == b"downloaded_on_retry"
+    assert len(attempts) == 2
+
 
 

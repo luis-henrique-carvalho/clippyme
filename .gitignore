@@ -70,5 +70,9 @@ fonts/NotoColorEmoji.ttf
 # Isolated feature worktrees
 .worktrees/
 
-# Local Codex CLI settings
-.codex/
+# Crash dumps
+core
+core.*
+gpucore*
+*.gpu
+
