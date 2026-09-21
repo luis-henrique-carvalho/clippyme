@@ -20,96 +20,43 @@ def _strip_ass_braces(text: str) -> str:
     return (text or "").replace('{', '').replace('}', '')
 
 
-_cuda_works = None  # cached after first check
-
-def _check_cuda():
-    global _cuda_works
-    if _cuda_works is not None:
-        return _cuda_works
-    import torch
-    if not torch.cuda.is_available():
-        _cuda_works = False
-        return False
-    try:
-        import numpy as _np
-        from faster_whisper import WhisperModel
-        _m = WhisperModel("tiny", device="cuda", compute_type="float16")
-        _m.transcribe(_np.zeros(16000, dtype=_np.float32))
-        del _m
-        _cuda_works = True
-    except Exception:
-        _cuda_works = False
-    return _cuda_works
-
-def _select_whisper_model():
-    """Auto-select Whisper model based on hardware."""
-    import os
-    override = os.getenv("WHISPER_MODEL")
-    if override:
-        return override
-    if _check_cuda():
-        import torch
-        vram = torch.cuda.get_device_properties(0).total_memory / (1024**3)
-        if vram >= 6: return "large-v3"
-        if vram >= 3: return "medium"
-        return "small"
-    else:
-        import psutil
-        ram = psutil.virtual_memory().total / (1024**3)
-        if ram >= 16: return "medium"
-        if ram >= 8: return "small"
-        return "base"
-
-# Model instances are expensive to build (weights load from disk); cache one
-# per (model, device, compute_type) like main.py's _get_whisper_model does.
-_whisper_models: dict = {}
-
-
-def _get_cached_whisper_model(whisper_model, device, compute_type):
-    from faster_whisper import WhisperModel
-
-    key = (whisper_model, device, compute_type)
-    if key not in _whisper_models:
-        _whisper_models[key] = WhisperModel(
-            whisper_model, device=device, compute_type=compute_type)
-    return _whisper_models[key]
-
-
 def transcribe_audio(video_path):
     """
-    Transcribe audio from a video file using faster-whisper.
+    Transcribe audio from a video file using Whisper.
     Returns transcript in the same format as main.py for compatibility.
     """
-    device = "cuda" if _check_cuda() else "cpu"
-    compute_type = "float16" if device == "cuda" else "int8"
-    whisper_model = _select_whisper_model()
+    from clippyme.pipeline.hardware import WHISPER_DEVICE, WHISPER_MODEL
+    from clippyme.pipeline.whisper_transcribe import transcribe_with_whisper
+
+    device = WHISPER_DEVICE
+    compute_type = "float16" if device == "cuda" else "default"
+    whisper_model = WHISPER_MODEL
     logger.info("🎙️  Transcribing audio [%s] from: %s (%s mode)", whisper_model, video_path, device.upper())
-    model = _get_cached_whisper_model(whisper_model, device, compute_type)
-    segments, info = model.transcribe(video_path, word_timestamps=True)
-    segments = list(segments)
+
+    res = transcribe_with_whisper(video_path, model_name=whisper_model, device=device, compute_type=compute_type)
 
     transcript = {
         "segments": [],
-        "language": info.language
+        "language": res.get("language", "en")
     }
 
-    for segment in segments:
+    for segment in res.get("segments") or []:
         seg_data = {
-            "start": segment.start,
-            "end": segment.end,
-            "text": segment.text,
+            "start": float(segment.get("start", 0.0)),
+            "end": float(segment.get("end", 0.0)),
+            "text": str(segment.get("text", "")),
             "words": []
         }
-        if segment.words:
-            for word in segment.words:
+        if segment.get("words"):
+            for word in segment["words"]:
                 seg_data["words"].append({
-                    "word": word.word.strip(),
-                    "start": word.start,
-                    "end": word.end
+                    "word": str(word.get("word", "")).strip(),
+                    "start": float(word.get("start", 0.0)),
+                    "end": float(word.get("end", 0.0))
                 })
         transcript["segments"].append(seg_data)
 
-    logger.info("✅ Transcription complete. Language: %s", info.language)
+    logger.info("✅ Transcription complete. Language: %s", transcript["language"])
     return transcript
 
 

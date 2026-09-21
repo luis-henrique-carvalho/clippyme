@@ -895,3 +895,47 @@ def test_get_batch_and_item_includes_context_and_logs(api_client):
     assert len(item_in_batch["logs"]) == 1
 
 
+def test_regenerate_copy_endpoint(api_client, monkeypatch):
+    """POST /items/{id}/regenerate-copy triggers copy regeneration and returns updated item."""
+    from clippyme.api.viral_studio_schemas import AICopyData
+
+    brand = api_client.post(
+        "/api/viral-studio/brands",
+        json={"id": "regen-brand", "name": "Regen Brand", "handle": "@regenbrand"},
+    ).json()
+
+    batch_resp = api_client.post(
+        "/api/viral-studio/batches",
+        json={
+            "brand_id": "regen-brand",
+            "items": [{"source_url": "https://www.instagram.com/reel/C_REGEN_API/", "product_code": "RG-99"}],
+        },
+    )
+    assert batch_resp.status_code == 201
+    item_id = batch_resp.json()["items"][0]["id"]
+
+    async def mock_fake_copy(brand, item, video_path=None, model=None, video_context=None):
+        return AICopyData(
+            product="Produto Regenerado API",
+            product_description="Desc",
+            headlines=["H1", "H2", "H3", "H4", "H5"],
+            selected_headline="H1",
+            caption="Legenda Regenerada 📌 Produto RG-99",
+            hashtags=["#regen"],
+        )
+
+    monkeypatch.setattr("clippyme.domain.viral_studio_copy.generate_affiliate_copy", mock_fake_copy)
+
+    resp = api_client.post(
+        f"/api/viral-studio/items/{item_id}/regenerate-copy",
+        json={"model": "lmstudio:google/gemma-4-12b-qat", "manual_instructions": "Foco em vendas"},
+    )
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["ai_copy"]["product"] == "Produto Regenerado API"
+    assert data["selected_headline"] == "H1"
+    assert "Legenda Regenerada" in data["caption"]
+    assert data["model"] == "lmstudio:google/gemma-4-12b-qat"
+
+
+

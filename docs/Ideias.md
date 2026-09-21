@@ -59,3 +59,5 @@ Por exemplo, acho que a persona atualmente é para produtos, ela é ligada a pro
 Então eu quero poder editar meu template para que eu possa escolher qual persona vai ser utilizada. Por exemplo: 'Ah, eu quero um canal de curiosidades', então a persona vai ser um especialista em criar canal de curiosidades e tal, e aí ele vai criar headlines chamativas para canal de curiosidades, não de produto que nem acontece atualmente, entendeu?
 
 Então acho que é isso."
+
+- Saas de criação de contas e perfis automaticos

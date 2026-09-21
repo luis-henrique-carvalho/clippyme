@@ -5,7 +5,7 @@ import { useModalA11y } from './useModalA11y';
 import { Icon, Social, Btn, Badge, Switch, Segmented, Panel } from './primitives';
 import { Hero } from './chrome';
 import {
-  getConfig, saveConfig, getModels, cookiesStatus,
+  getConfig, saveConfig, getModels, getLocalAIModels, cookiesStatus,
   uploadPlatformCookies, deletePlatformCookies,
   getZernio, saveZernio, discoverZernioAccounts,
   listFonts, uploadFont, deleteFont, logoStatus, uploadLogo, deleteLogo,
@@ -137,8 +137,23 @@ export function SettingsView({ apiKey, onApiKey, cookiesConfigured, onCookiesCha
   const [fonts, setFonts] = useState([]);
   const [provider, setProvider] = useState('deepgram');
   const [model, setModel] = useState('');
+  const [defaultAIModel, setDefaultAIModel] = useState('');
   const [models, setModels] = useState(FALLBACK_MODELS);
   const [loadingModels, setLoadingModels] = useState(false);
+  const [localAI, setLocalAI] = useState({
+    lm_studio: { online: false, base_url: '', models: [] },
+    ollama: { online: false, base_url: '', models: [] },
+  });
+  const [loadingLocalAI, setLoadingLocalAI] = useState(false);
+
+  const loadLocalAI = async () => {
+    setLoadingLocalAI(true);
+    try {
+      const data = await getLocalAIModels();
+      if (data) setLocalAI(data);
+    } catch { /* silent */ }
+    finally { setLoadingLocalAI(false); }
+  };
 
   // Pull the live model list from the backend (uses the saved key if the
   // header is empty). Merges discovery with the curated fallback + the
@@ -170,10 +185,12 @@ export function SettingsView({ apiKey, onApiKey, cookiesConfigured, onCookiesCha
     });
     if (c.TRANSCRIPTION_PROVIDER) setProvider(c.TRANSCRIPTION_PROVIDER);
     if (c.GEMINI_MODEL) setModel(c.GEMINI_MODEL);
+    if (c.DEFAULT_AI_MODEL !== undefined) setDefaultAIModel(c.DEFAULT_AI_MODEL || '');
   };
 
   useEffect(() => {
     refreshConfig().then(loadModels);
+    loadLocalAI();
     getZernio().then((z) => { setZernioState(z); if (z.accounts) setAccts({ tiktok: '', instagram: '', youtube: '', ...z.accounts }); }).catch(() => {});
     cookiesStatus().then((s) => setCookies(s || {})).catch(() => {});
     logoStatus().then((s) => setLogoOn(!!s.configured)).catch(() => {});
@@ -304,7 +321,7 @@ export function SettingsView({ apiKey, onApiKey, cookiesConfigured, onCookiesCha
         {provider === 'elevenlabs' && !present.elevenlabs && (
           <div className="od" style={{ color: 'var(--warn, #f5a623)', padding: '0 0 8px 44px' }}>⚠ No ElevenLabs key saved — pipeline will use local Whisper.</div>
         )}
-        <div className="opt" style={{ borderBottom: 0 }}>
+        <div className="opt">
           <div className="oico"><Icon n="sparkles" /></div>
           <div className="otxt"><div className="ot">Gemini model</div><div className="od">Viral-moment detection model · applied to new jobs</div></div>
           <div className="r" style={{ gap: 8 }}>
@@ -318,6 +335,106 @@ export function SettingsView({ apiKey, onApiKey, cookiesConfigured, onCookiesCha
             <Btn variant="ghost" size="sm" icon="refresh-cw" onClick={() => loadModels()} disabled={loadingModels}>
               {loadingModels ? '…' : 'Refresh'}
             </Btn>
+          </div>
+        </div>
+
+        <div className="opt">
+          <div className="oico"><Icon n="bot" /></div>
+          <div className="otxt"><div className="ot">Modelo de IA Padrão</div><div className="od">Modelo padrão para todo o sistema (Viral Studio, cópias e análises)</div></div>
+          <div className="r" style={{ gap: 8 }}>
+            <select
+              className="key-input"
+              style={{ width: 'auto', minWidth: 220, fontFamily: 'var(--font-sans)' }}
+              value={defaultAIModel}
+              onChange={(e) => {
+                setDefaultAIModel(e.target.value);
+                saveKeys({ DEFAULT_AI_MODEL: e.target.value });
+              }}
+            >
+              <option value="">Padrão (Automático / Gemini 3.5 Flash)</option>
+
+              {/* LM Studio Conectado */}
+              {localAI?.lm_studio?.online && localAI.lm_studio.models?.length > 0 && (
+                <optgroup label={`🟢 LM Studio Conectado (${localAI.lm_studio.models.length})`}>
+                  {localAI.lm_studio.models.map((m) => (
+                    <option key={`lmstudio:${m.id}`} value={`lmstudio:${m.id}`}>
+                      {m.name} (LM Studio Local ⚡)
+                    </option>
+                  ))}
+                </optgroup>
+              )}
+
+              {/* Ollama Conectado */}
+              {localAI?.ollama?.online && localAI.ollama.models?.length > 0 && (
+                <optgroup label={`🟢 Ollama Conectado (${localAI.ollama.models.length})`}>
+                  {localAI.ollama.models.map((m) => (
+                    <option key={`ollama:${m.id || m.name}`} value={`ollama:${m.id || m.name}`}>
+                      {m.name} (Ollama Local ⚡)
+                    </option>
+                  ))}
+                </optgroup>
+              )}
+
+              {/* Gemini Models */}
+              <optgroup label="Google Gemini (Nuvem)">
+                {models.map((m) => (
+                  <option key={m.name} value={`gemini:${m.name}`}>
+                    {m.display_name || m.name}
+                  </option>
+                ))}
+              </optgroup>
+            </select>
+          </div>
+        </div>
+
+        <div className="opt" style={{ borderBottom: 0, flexDirection: 'column', alignItems: 'stretch', gap: 10 }}>
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+              <div className="oico"><Icon n="cpu" /></div>
+              <div className="otxt">
+                <div className="ot">Servidores de IA Local</div>
+                <div className="od">Descoberta automática de modelos locais (LM Studio & Ollama) para geração gratuita</div>
+              </div>
+            </div>
+            <Btn variant="ghost" size="sm" icon="refresh-cw" onClick={() => loadLocalAI()} disabled={loadingLocalAI}>
+              {loadingLocalAI ? '…' : 'Sondar Servidores'}
+            </Btn>
+          </div>
+
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(240px, 1fr))', gap: 10, marginTop: 4 }}>
+            {/* LM Studio Card */}
+            <div style={{ background: 'var(--bg-3)', border: '1px solid var(--line-1)', borderRadius: 'var(--r-md)', padding: '12px 14px', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+              <div>
+                <div style={{ fontWeight: 600, fontSize: 'var(--text-sm)', color: 'var(--fg-1)' }}>LM Studio</div>
+                <div style={{ fontSize: 'var(--text-2xs)', color: 'var(--fg-3)', fontFamily: 'var(--font-mono)' }}>:1234/v1</div>
+              </div>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                {localAI?.lm_studio?.online ? (
+                  <Badge tone="teal" icon="check">
+                    Conectado ({localAI.lm_studio.models?.length || 0} {localAI.lm_studio.models?.length === 1 ? 'modelo' : 'modelos'})
+                  </Badge>
+                ) : (
+                  <Badge tone="out">Desconectado</Badge>
+                )}
+              </div>
+            </div>
+
+            {/* Ollama Card */}
+            <div style={{ background: 'var(--bg-3)', border: '1px solid var(--line-1)', borderRadius: 'var(--r-md)', padding: '12px 14px', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+              <div>
+                <div style={{ fontWeight: 600, fontSize: 'var(--text-sm)', color: 'var(--fg-1)' }}>Ollama</div>
+                <div style={{ fontSize: 'var(--text-2xs)', color: 'var(--fg-3)', fontFamily: 'var(--font-mono)' }}>:11434/api</div>
+              </div>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                {localAI?.ollama?.online ? (
+                  <Badge tone="teal" icon="check">
+                    Conectado ({localAI.ollama.models?.length || 0} {localAI.ollama.models?.length === 1 ? 'modelo' : 'modelos'})
+                  </Badge>
+                ) : (
+                  <Badge tone="out">Desconectado</Badge>
+                )}
+              </div>
+            </div>
           </div>
         </div>
       </Panel>

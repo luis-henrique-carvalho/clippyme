@@ -25,6 +25,11 @@ from typing import Any, Dict, List, Optional, Union
 
 from clippyme.domain.errors import ConflictError, NotFoundError, ValidationError
 
+try:
+    import fcntl
+except ImportError:  # pragma: no cover - exercised on Windows
+    fcntl = None
+
 logger = logging.getLogger("clippyme.viral_studio_store")
 
 SAFE_ASSET_PREFIXES = ("uploads/", "data/")
@@ -95,7 +100,83 @@ TEMPLATES_FILE: Optional[str] = None
 BATCHES_FILE: Optional[str] = None
 ITEMS_FILE: Optional[str] = None
 
-_STORE_LOCK = threading.RLock()
+_STORE_THREAD_LOCK = threading.RLock()
+_LOCK_DEPTH = 0
+_LOCK_FD: Optional[int] = None
+
+
+def get_lock_path() -> str:
+    directory = (
+        os.path.dirname(BATCHES_FILE) if BATCHES_FILE
+        else os.path.dirname(BRANDS_FILE) if BRANDS_FILE
+        else DATA_DIR
+    ) or "."
+    return os.path.join(directory, ".store.lock")
+
+
+@contextlib.contextmanager
+def store_lock():
+    """Context manager for cross-process (and cross-thread) exclusive store access."""
+    global _LOCK_DEPTH, _LOCK_FD
+    _STORE_THREAD_LOCK.acquire()
+    try:
+        if _LOCK_DEPTH == 0 and fcntl is not None:
+            lock_path = get_lock_path()
+            lock_dir = os.path.dirname(lock_path) or "."
+            os.makedirs(lock_dir, mode=0o700, exist_ok=True)
+            fd = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o600)
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX)
+            except Exception:
+                with contextlib.suppress(OSError):
+                    os.close(fd)
+                raise
+            _LOCK_FD = fd
+        _LOCK_DEPTH += 1
+        try:
+            yield
+        finally:
+            _LOCK_DEPTH -= 1
+            if _LOCK_DEPTH == 0 and _LOCK_FD is not None:
+                fd = _LOCK_FD
+                _LOCK_FD = None
+                try:
+                    fcntl.flock(fd, fcntl.LOCK_UN)
+                except OSError:
+                    pass
+                finally:
+                    with contextlib.suppress(OSError):
+                        os.close(fd)
+    finally:
+        _STORE_THREAD_LOCK.release()
+
+
+_LOCAL = threading.local()
+
+
+class _StoreLockWrapper:
+    def __enter__(self):
+        cm = store_lock()
+        stack = getattr(_LOCAL, "stack", None)
+        if stack is None:
+            stack = []
+            _LOCAL.stack = stack
+        stack.append(cm)
+        return cm.__enter__()
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        stack = getattr(_LOCAL, "stack", None)
+        if stack:
+            cm = stack.pop()
+            return cm.__exit__(exc_type, exc_val, exc_tb)
+        return None
+
+    def __call__(self):
+        return store_lock()
+
+
+_STORE_LOCK = _StoreLockWrapper()
+_store_lock = store_lock
 
 # Default Seeds
 DEFAULT_BRAND_ID = "vale-o-clique"
@@ -843,6 +924,26 @@ def save_item(item: Union[Dict[str, Any], Any]) -> Dict[str, Any]:
     if not item_id:
         raise ValidationError("item_id is required")
     return update_item(item_id, data)
+
+
+def append_item_log(item_id: str, log_entry: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """Atomically append a log entry to an item's log list under the store lock."""
+    if not item_id:
+        raise ValidationError("item_id is required")
+    with _STORE_LOCK:
+        batches = _load_batches_locked()
+        for batch in batches.values():
+            for idx, item in enumerate(batch.get("items", [])):
+                if item.get("id") == item_id or item.get("item_id") == item_id:
+                    logs = list(item.get("logs") or [])
+                    logs.append(dict(log_entry))
+                    item["logs"] = logs
+                    item["updated_at"] = _utcnow_iso()
+                    batch["items"][idx] = item
+                    batch["updated_at"] = _utcnow_iso()
+                    _atomic_write_json(get_batches_path(), batches)
+                    return logs
+        raise NotFoundError(f"Item not found: {item_id}")
 
 
 def seed_defaults(force: bool = False) -> None:

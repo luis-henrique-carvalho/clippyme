@@ -21,6 +21,8 @@ bodies.
 import base64
 import struct
 
+import os
+
 import pytest
 from fastapi.testclient import TestClient
 
@@ -46,7 +48,10 @@ NETSCAPE_COOKIES = b"# Netscape HTTP Cookie File\n.example.com\tTRUE\t/\tFALSE\t
 def client(tmp_path, monkeypatch):
     """A trusted-origin client whose disk writes land under a tmp dir."""
     monkeypatch.chdir(tmp_path)
-    return TestClient(app_module.app, headers=ORIGIN)
+    old_env = dict(os.environ)
+    yield TestClient(app_module.app, headers=ORIGIN)
+    os.environ.clear()
+    os.environ.update(old_env)
 
 
 # --- trusted-client gate ----------------------------------------------------
@@ -256,3 +261,106 @@ def test_zernio_accounts_requires_key(client, monkeypatch):
     monkeypatch.setattr(config_module, "load_zernio_config", lambda: {})
     r = client.get("/api/zernio/accounts")
     assert r.status_code == 400
+
+
+# --- local models probe -----------------------------------------------------
+
+def test_local_models_probe_success(client, monkeypatch):
+    def mock_probe_lm():
+        return {
+            "online": True,
+            "base_url": "http://localhost:1234",
+            "models": [{"id": "qwen2.5-7b-instruct", "name": "qwen2.5-7b-instruct"}],
+        }
+
+    def mock_probe_ollama():
+        return {
+            "online": True,
+            "base_url": "http://localhost:11434",
+            "models": [{"id": "llama3.2:latest", "name": "llama3.2:latest"}],
+        }
+
+    monkeypatch.setattr(config_module, "_probe_lm_studio", mock_probe_lm)
+    monkeypatch.setattr(config_module, "_probe_ollama", mock_probe_ollama)
+
+    r = client.get("/api/config/local-models")
+    assert r.status_code == 200
+    data = r.json()
+    assert data["lm_studio"]["online"] is True
+    assert data["lm_studio"]["models"][0]["id"] == "qwen2.5-7b-instruct"
+    assert data["ollama"]["online"] is True
+    assert data["ollama"]["models"][0]["id"] == "llama3.2:latest"
+
+    models = data["models"]
+    assert len(models) == 2
+    assert models[0]["id"] == "lmstudio:qwen2.5-7b-instruct"
+    assert models[0]["provider"] == "lm_studio"
+    assert models[1]["id"] == "ollama:llama3.2:latest"
+    assert models[1]["provider"] == "ollama"
+
+
+def test_local_models_probe_offline(client, monkeypatch):
+    monkeypatch.setattr(
+        config_module,
+        "_probe_lm_studio",
+        lambda: {"online": False, "base_url": "http://localhost:1234", "models": []},
+    )
+    monkeypatch.setattr(
+        config_module,
+        "_probe_ollama",
+        lambda: {"online": False, "base_url": "http://localhost:11434", "models": []},
+    )
+
+    r = client.get("/api/config/local-models")
+    assert r.status_code == 200
+    data = r.json()
+    assert data["lm_studio"]["online"] is False
+    assert data["lm_studio"]["models"] == []
+    assert data["ollama"]["online"] is False
+    assert data["ollama"]["models"] == []
+    assert data["models"] == []
+
+
+def test_config_roundtrip_default_ai_model(client):
+    r = client.post(
+        "/api/config",
+        json={"keys": {"DEFAULT_AI_MODEL": "lmstudio:google/gemma-4-12b-qat"}},
+    )
+    assert r.status_code == 200
+    got = client.get("/api/config").json()
+    assert got["DEFAULT_AI_MODEL"] == "lmstudio:google/gemma-4-12b-qat"
+
+
+def test_local_models_probe_filters_embedding_models(monkeypatch):
+    monkeypatch.setattr(
+        config_module,
+        "_probe_url_json",
+        lambda url, timeout: {
+            "data": [
+                {"id": "text-embedding-nomic-embed-text-v1.5"},
+                {"id": "bge-m3"},
+                {"id": "all-minilm-l6-v2"},
+                {"id": "google/gemma-4-12b-qat"},
+            ]
+        },
+    )
+    lm_res = config_module._probe_lm_studio()
+    assert lm_res["online"] is True
+    assert len(lm_res["models"]) == 1
+    assert lm_res["models"][0]["id"] == "google/gemma-4-12b-qat"
+
+    monkeypatch.setattr(
+        config_module,
+        "_probe_url_json",
+        lambda url, timeout: {
+            "models": [
+                {"name": "nomic-embed-text:latest"},
+                {"name": "llama3.2:latest"},
+            ]
+        },
+    )
+    ollama_res = config_module._probe_ollama()
+    assert ollama_res["online"] is True
+    assert len(ollama_res["models"]) == 1
+    assert ollama_res["models"][0]["name"] == "llama3.2:latest"
+

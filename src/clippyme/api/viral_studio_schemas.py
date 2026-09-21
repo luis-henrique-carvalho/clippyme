@@ -606,6 +606,11 @@ class ItemRenderRequest(BaseModel):
     watermark: bool = True
 
 
+class ItemRegenerateCopyRequest(BaseModel):
+    model: Optional[str] = Field(None, max_length=128)
+    manual_instructions: Optional[str] = Field(None, max_length=1000)
+
+
 class ViralPublishPlatform(BaseModel):
     platform: str = Field(..., max_length=64)
     accountId: Optional[str] = Field(None, max_length=128)

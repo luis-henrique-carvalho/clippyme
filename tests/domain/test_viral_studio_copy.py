@@ -10,6 +10,11 @@ from clippyme.domain import viral_studio_copy
 from clippyme.domain.errors import ClippyMeError, ValidationError
 
 
+@pytest.fixture(autouse=True)
+def isolate_config(monkeypatch):
+    monkeypatch.setattr("clippyme.domain.viral_studio_copy.load_persistent_config", lambda: {})
+
+
 @pytest.fixture
 def sample_brand():
     return Brand(
@@ -902,6 +907,9 @@ def test_parse_model_identifier():
     assert viral_studio_copy.parse_model_identifier("ollama:qwen2.5") == ("ollama", "qwen2.5")
     assert viral_studio_copy.parse_model_identifier("llama3.2") == ("ollama", "llama3.2")
     assert viral_studio_copy.parse_model_identifier("qwen2.5") == ("ollama", "qwen2.5")
+    assert viral_studio_copy.parse_model_identifier("google/gemma-4-12b-qat") == ("lmstudio", "google/gemma-4-12b-qat")
+    assert viral_studio_copy.parse_model_identifier("prism-ml/bonsai-27b") == ("lmstudio", "prism-ml/bonsai-27b")
+    assert viral_studio_copy.parse_model_identifier("lmstudio:google/gemma-4-12b-qat") == ("lmstudio", "google/gemma-4-12b-qat")
     assert viral_studio_copy.parse_model_identifier("gemini-3.5-flash") == ("gemini", "gemini-3.5-flash")
 
 
@@ -1030,6 +1038,234 @@ def test_generate_affiliate_copy_with_gemini_prefix(sample_brand):
         mock_models.generate_content.assert_called_once()
         call_kwargs = mock_models.generate_content.call_args[1]
         assert call_kwargs["model"] == "gemini-3.6-flash"
+
+
+def test_lm_studio_provider_success():
+    provider = viral_studio_copy.LMStudioProvider(base_url="http://localhost:1234")
+    fake_json_resp = {
+        "choices": [
+            {
+                "message": {
+                    "role": "assistant",
+                    "content": json.dumps({
+                        "product": "Mini Selador LM Studio",
+                        "product_description": "Selador térmico portátil",
+                        "headlines": ["Headline 1", "Headline 2", "Headline 3", "Headline 4", "Headline 5"],
+                        "selected_headline": "Headline 1",
+                        "caption": "Legenda gerada por LM Studio",
+                        "hashtags": ["#lmstudio", "#achadinhos"],
+                    }),
+                }
+            }
+        ],
+        "usage": {
+            "prompt_tokens": 140,
+            "completion_tokens": 95,
+            "total_tokens": 235,
+        },
+    }
+
+    with patch.object(provider, "_sync_generate", return_value=fake_json_resp):
+        raw_text, telemetry = asyncio.run(provider.generate_copy("prompt text", "qwen2.5-7b"))
+        assert "Mini Selador LM Studio" in raw_text
+        assert telemetry["provider"] == "lm_studio"
+        assert telemetry["model"] == "lmstudio:qwen2.5-7b"
+        assert telemetry["prompt_tokens"] == 140
+        assert telemetry["candidate_tokens"] == 95
+        assert telemetry["total_tokens"] == 235
+        assert telemetry["cost_usd"] == 0.0
+
+
+def test_lm_studio_provider_connection_error_raises_clippyme_error():
+    import urllib.error
+    provider = viral_studio_copy.LMStudioProvider(base_url="http://localhost:1234")
+    with patch("urllib.request.urlopen", side_effect=urllib.error.URLError("Connection refused")):
+        with pytest.raises(ClippyMeError, match="Cannot connect to LM Studio"):
+            asyncio.run(provider.generate_copy("prompt text", "qwen2.5-7b"))
+
+
+def test_lm_studio_provider_empty_response_raises_clippyme_error():
+    provider = viral_studio_copy.LMStudioProvider(base_url="http://localhost:1234")
+    with patch.object(provider, "_sync_generate", return_value={"choices": [{"message": {"content": ""}}]}):
+        with pytest.raises(ClippyMeError, match="LM Studio returned empty response"):
+            asyncio.run(provider.generate_copy("prompt text", "qwen2.5-7b"))
+
+
+def test_generate_affiliate_copy_with_lmstudio_provider(sample_brand, sample_item):
+    fake_json_resp = {
+        "choices": [
+            {
+                "message": {
+                    "role": "assistant",
+                    "content": json.dumps({
+                        "product": "Suporte LM Studio Local",
+                        "product_description": "Suporte articulado para monitor",
+                        "headlines": [
+                            "Melhore sua postura no home office!",
+                            "Organize sua mesa agora!",
+                            "Esse suporte vai transformar seu setup!",
+                            "Prático e super resistente!",
+                            "Achadinho perfeito para o escritório!",
+                        ],
+                        "selected_headline": "Melhore sua postura no home office!",
+                        "caption": "Melhore sua postura com esse suporte incrível!\\n📌 Produto PROD-99\\nConfira no link da bio!\\n#homeoffice #dicas",
+                        "hashtags": ["#homeoffice", "#dicas", "#achadinhos"],
+                    }),
+                }
+            }
+        ],
+        "usage": {
+            "prompt_tokens": 160,
+            "completion_tokens": 100,
+            "total_tokens": 260,
+        },
+    }
+
+    item_dict = {
+        "id": "item-lmstudio-01",
+        "source_url": "https://instagram.com/reel/123",
+        "product_code": "PROD-99",
+        "model": "lmstudio:qwen2.5-7b",
+    }
+
+    with patch.object(viral_studio_copy.LMStudioProvider, "_sync_generate", return_value=fake_json_resp), \
+         patch("clippyme.domain.viral_studio_store.update_item") as mock_update:
+
+        copy_res = asyncio.run(viral_studio_copy.generate_affiliate_copy(
+            brand=sample_brand,
+            item=item_dict,
+        ))
+
+        assert copy_res.product == "Suporte LM Studio Local"
+        assert copy_res.selected_headline == "Melhore sua postura no home office!"
+        assert "PROD-99" in copy_res.caption
+        assert item_dict["ai_telemetry"]["provider"] == "lm_studio"
+        assert item_dict["ai_telemetry"]["model"] == "lmstudio:qwen2.5-7b"
+        assert item_dict["ai_telemetry"]["cost_usd"] == 0.0
+        assert mock_update.called
+
+
+def test_parse_model_identifier_lmstudio_and_local():
+    assert viral_studio_copy.parse_model_identifier("lmstudio:qwen2.5-7b") == ("lmstudio", "qwen2.5-7b")
+    assert viral_studio_copy.parse_model_identifier("lm_studio:model-x") == ("lmstudio", "model-x")
+    assert viral_studio_copy.parse_model_identifier("local:my-model") == ("lmstudio", "my-model")
+    assert viral_studio_copy.parse_model_identifier("lmstudio/qwen2.5-7b") == ("lmstudio", "qwen2.5-7b")
+
+
+def test_lm_studio_provider_candidate_fallback(monkeypatch):
+    import urllib.error
+    monkeypatch.delenv("LM_STUDIO_BASE_URL", raising=False)
+    provider = viral_studio_copy.LMStudioProvider()
+    
+    # Simulate first candidate failing with URLError, second returning success JSON
+    class FakeResponse:
+        def getcode(self):
+            return 200
+        def read(self):
+            return json.dumps({
+                "choices": [{"message": {"content": json.dumps({"headlines": ["H1"], "caption": "Cap"})}}],
+                "usage": {"prompt_tokens": 10, "completion_tokens": 10},
+            }).encode("utf-8")
+        def __enter__(self):
+            return self
+        def __exit__(self, *args):
+            pass
+
+    call_count = 0
+    def fake_urlopen(req, timeout=120):
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            raise urllib.error.URLError("Connection refused on candidate 1")
+        return FakeResponse()
+
+    with patch("clippyme.domain.viral_studio_copy.load_persistent_config", return_value={}), \
+         patch("urllib.request.urlopen", side_effect=fake_urlopen):
+        raw_text, telemetry = asyncio.run(provider.generate_copy("prompt", "qwen2.5"))
+        assert call_count == 2
+        assert "H1" in raw_text
+        assert telemetry["provider"] == "lm_studio"
+
+
+def test_ollama_provider_candidate_fallback(monkeypatch):
+    import urllib.error
+    monkeypatch.delenv("OLLAMA_BASE_URL", raising=False)
+    provider = viral_studio_copy.OllamaProvider()
+
+    class FakeResponse:
+        def getcode(self):
+            return 200
+        def read(self):
+            return json.dumps({
+                "response": "{\"headlines\": [\"Ollama H1\"], \"caption\": \"Cap\"}",
+                "prompt_eval_count": 10,
+                "eval_count": 10,
+            }).encode("utf-8")
+        def __enter__(self):
+            return self
+        def __exit__(self, *args):
+            pass
+
+    call_count = 0
+    def fake_urlopen(req, timeout=120):
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            raise urllib.error.URLError("Connection refused on candidate 1")
+        return FakeResponse()
+
+    with patch("clippyme.domain.viral_studio_copy.load_persistent_config", return_value={}), \
+         patch("urllib.request.urlopen", side_effect=fake_urlopen):
+        raw_text, telemetry = asyncio.run(provider.generate_copy("prompt", "llama3.2"))
+        assert call_count == 2
+        assert "Ollama H1" in raw_text
+        assert telemetry["provider"] == "ollama"
+
+
+def test_generate_affiliate_copy_model_resolution_precedence(sample_brand, sample_item):
+    """Resolution order: explicit model > DEFAULT_AI_MODEL > GEMINI_MODEL > gemini-3.5-flash."""
+    mock_resp = MagicMock()
+    mock_resp.text = json.dumps({
+        "product": "P",
+        "headlines": ["H1", "H2", "H3", "H4", "H5"],
+        "selected_headline": "H1",
+        "caption": "Cap",
+        "hashtags": ["#tag"],
+    })
+    mock_client = MagicMock()
+    mock_client.aio.models.generate_content = AsyncMock(return_value=mock_resp)
+
+    # DEFAULT_AI_MODEL is used when no explicit model passed
+    sample_item.model = None
+    with patch("clippyme.domain.viral_studio_copy.load_persistent_config", return_value={"DEFAULT_AI_MODEL": "gemini-3.6-flash", "GEMINI_MODEL": "gemini-2.5-flash"}), \
+         patch("google.genai.Client", return_value=mock_client):
+        res = asyncio.run(viral_studio_copy.generate_affiliate_copy(sample_brand, sample_item, api_key="dummy"))
+        assert res.product == "P"
+        mock_client.aio.models.generate_content.assert_called_with(model="gemini-3.6-flash", contents=mock_client.aio.models.generate_content.call_args[1]["contents"])
+
+
+def test_local_provider_failure_does_not_silently_fallback_to_gemini(sample_brand, sample_item):
+    """When a local model is specified and LM Studio fails, raise ClippyMeError instead of falling back to Gemini."""
+    sample_item.model = "lmstudio:google/gemma-4-12b-qat"
+    with patch("urllib.request.urlopen", side_effect=Exception("Connection refused")), \
+         patch("google.genai.Client") as mock_gemini:
+        with pytest.raises(ClippyMeError) as exc_info:
+            asyncio.run(viral_studio_copy.generate_affiliate_copy(sample_brand, sample_item))
+        assert not mock_gemini.called
+def test_parse_model_identifier_tagged_and_prefixed():
+    """Verify parse_model_identifier handles tags, slash models, and provider prefixes."""
+    assert viral_studio_copy.parse_model_identifier("ollama:llama3.2:latest") == ("ollama", "llama3.2:latest")
+    assert viral_studio_copy.parse_model_identifier("llama3.2:latest") == ("ollama", "llama3.2:latest")
+    assert viral_studio_copy.parse_model_identifier("mistral:7b") == ("ollama", "mistral:7b")
+    assert viral_studio_copy.parse_model_identifier("gemini:gemini-3.5-flash") == ("gemini", "gemini-3.5-flash")
+    assert viral_studio_copy.parse_model_identifier("gemini-3.5-flash") == ("gemini", "gemini-3.5-flash")
+    assert viral_studio_copy.parse_model_identifier("lmstudio:google/gemma-4-12b-qat") == ("lmstudio", "google/gemma-4-12b-qat")
+    assert viral_studio_copy.parse_model_identifier("google/gemma-4-12b-qat") == ("lmstudio", "google/gemma-4-12b-qat")
+    assert viral_studio_copy.parse_model_identifier("") == ("gemini", "")
+    assert viral_studio_copy.parse_model_identifier(None) == ("gemini", "")
+
+
+
 
 
 

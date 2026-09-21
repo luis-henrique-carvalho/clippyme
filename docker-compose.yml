@@ -8,10 +8,6 @@
 
 name: clippyme
 
-networks:
-  clippyme-net:
-    driver: bridge
-
 services:
   backend:
     build:
@@ -24,13 +20,7 @@ services:
         ENABLE_WHISPER_DIARIZE: ${ENABLE_WHISPER_DIARIZE:-0}
     container_name: clippyme-backend
     image: clippyme-backend
-    ports:
-      # Bound to loopback: security.py treats every RFC1918 peer as a trusted
-      # client for the config/state endpoints (key overwrite, cookie download,
-      # job deletion), so publishing on 0.0.0.0 hands that trust to the whole
-      # LAN. Override CLIPPYME_BIND (e.g. CLIPPYME_BIND=0.0.0.0) ONLY on a
-      # network where every device is trusted.
-      - "${CLIPPYME_BIND:-127.0.0.1}:8000:8000"
+    network_mode: host
     dns:
       - 8.8.8.8
       - 8.8.4.4
@@ -136,26 +126,16 @@ services:
       - /app/__pycache__
       - ./data:/app/data
       - ./docker-entrypoint.sh:/usr/local/bin/docker-entrypoint.sh:ro
-    networks:
-      - clippyme-net
     restart: unless-stopped
 
   frontend:
     build: ./dashboard
     container_name: clippyme-frontend
     image: clippyme-frontend
-    ports:
-      # Loopback too: the Vite dev proxy forwards /api to the backend from
-      # INSIDE the docker network, where the frontend container is itself a
-      # trusted private peer — so a LAN-exposed dashboard would reopen the
-      # exact hole the backend loopback binding closes. Same CLIPPYME_BIND
-      # override applies.
-      - "${CLIPPYME_BIND:-127.0.0.1}:5175:5175"
+    network_mode: host
     volumes:
       - ./dashboard:/app
       - /app/node_modules
-    networks:
-      - clippyme-net
     restart: unless-stopped
     depends_on:
       - backend

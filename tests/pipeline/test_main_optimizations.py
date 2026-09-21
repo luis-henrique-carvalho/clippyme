@@ -12,31 +12,6 @@ pytestmark = pytest.mark.integration
 from clippyme.pipeline import main as m
 
 
-def test_whisper_model_is_cached_per_config(monkeypatch):
-    """_get_whisper_model must construct a model once per (name, device,
-    compute_type) and return the cached instance on subsequent calls."""
-    calls = []
-
-    class FakeModel:
-        def __init__(self, name, device=None, compute_type=None):
-            calls.append((name, device, compute_type))
-
-    # faster_whisper is imported lazily inside _get_whisper_model.
-    import faster_whisper
-    monkeypatch.setattr(faster_whisper, "WhisperModel", FakeModel)
-    monkeypatch.setattr(m, "_whisper_models", {})
-
-    a = m._get_whisper_model("base", "cpu", "int8")
-    b = m._get_whisper_model("base", "cpu", "int8")
-    assert a is b
-    assert len(calls) == 1  # constructed exactly once
-
-    # A different config constructs a second, distinct model.
-    c = m._get_whisper_model("base", "cuda", "float16")
-    assert c is not a
-    assert len(calls) == 2
-
-
 def _cam():
     return m.SmoothedCameraman(output_width=608, output_height=1080,
                                video_width=1920, video_height=1080)

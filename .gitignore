@@ -51,6 +51,7 @@ data/cookies.txt
 # Cache dirs
 .cache/
 .config/
+.triton/
 # Multi-agent Skills
 .agents/
 .agent/

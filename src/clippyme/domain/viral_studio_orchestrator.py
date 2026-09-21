@@ -18,6 +18,7 @@ import hashlib
 import json
 import logging
 import os
+import time
 import uuid
 from datetime import datetime
 from datetime import timezone as dt_timezone
@@ -31,6 +32,7 @@ from clippyme.api.viral_studio_schemas import (
     VisualTemplate,
 )
 from clippyme.domain import (
+    cookie_resolver,
     viral_studio_context,
     viral_studio_copy,
     viral_studio_download,
@@ -60,15 +62,44 @@ def append_item_log(
     if details:
         log_entry["details"] = details
     try:
-        item = viral_studio_store.get_item(item_id)
-        if item:
-            logs = list(item.get("logs") or [])
-            logs.append(log_entry)
-            viral_studio_store.update_item(item_id, {"logs": logs})
-            return logs
+        return viral_studio_store.append_item_log(item_id, log_entry)
     except Exception as exc:
         logger.debug("Could not persist log for item %s: %s", item_id, exc)
     return [log_entry]
+
+
+def _log_ai_routing(item_id: str, model_name: Optional[str], keyframes_count: int = 0) -> None:
+    """Log structured AI_ROUTING event with provider, model, and endpoint before generation."""
+    from clippyme.storage.config_store import load_persistent_config
+    cfg = load_persistent_config()
+    target_model_str = model_name or cfg.get("DEFAULT_AI_MODEL") or cfg.get("GEMINI_MODEL") or "gemini-3.5-flash"
+    provider_name, subname = viral_studio_copy.parse_model_identifier(target_model_str)
+
+    if provider_name in ("lmstudio", "local", "lm_studio"):
+        prov_label = "LM Studio"
+        base = os.environ.get("LM_STUDIO_BASE_URL") or cfg.get("LM_STUDIO_BASE_URL") or "http://localhost:1234"
+        endpoint = f"{str(base).rstrip('/')}/v1/chat/completions"
+        target_model = subname or "local-model"
+    elif provider_name == "ollama":
+        prov_label = "Ollama"
+        base = os.environ.get("OLLAMA_BASE_URL") or cfg.get("OLLAMA_BASE_URL") or "http://localhost:11434"
+        endpoint = f"{str(base).rstrip('/')}/api/generate"
+        target_model = subname or "llama3.2"
+    else:
+        prov_label = "Google Gemini"
+        endpoint = "Google Gemini API (Cloud)"
+        target_model = subname or target_model_str
+
+    frames_msg = f" e {keyframes_count} frames" if keyframes_count > 0 else ""
+    msg = f"Enviando prompt{frames_msg} para {prov_label} ({target_model} via {endpoint})"
+    details = {
+        "provider": provider_name,
+        "target_model": target_model,
+        "endpoint": endpoint,
+        "multimodal_frames": keyframes_count,
+    }
+    append_item_log(item_id, "AI_ROUTING", msg, details=details)
+
 
 def _get_output_dir() -> str:
     return os.environ.get("CLIPPYME_OUTPUT_DIR") or "output"
@@ -185,18 +216,39 @@ async def process_viral_item(item_id: str) -> Dict[str, Any]:
             # ------------------------------------------------------------------
             viral_studio_store.update_item(item_id, {"status": "DOWNLOADING", "error_message": None})
             source_path = item.get("source_path")
+            source_url = item.get("source_url") or ""
             if not source_path or not os.path.isfile(source_path) or os.path.getsize(source_path) == 0:
                 target_source_path = _resolve_source_path(batch_id, item_id)
-                source_url = item.get("source_url")
                 if not source_url:
                     raise ValidationError("Missing source_url on item")
 
+                cookies_path = cookie_resolver.resolve_platform_cookies(source_url)
+                platform_name = cookie_resolver.normalize_platform_name(source_url)
+                cookies_info = f"cookies ({os.path.basename(cookies_path)})" if cookies_path else "sem cookies específicos"
+                append_item_log(
+                    item_id,
+                    "COOKIE_RESOLVED",
+                    f"Autenticação para {platform_name.upper()}: {cookies_info}",
+                    details={"platform": platform_name, "cookiefile": cookies_path},
+                )
+
+                append_item_log(
+                    item_id,
+                    "DOWNLOADING",
+                    f"Iniciando download do vídeo ({platform_name.upper()})...",
+                    details={"source_url": source_url, "platform": platform_name},
+                )
+
+                t_dl_start = time.perf_counter()
                 source_path = await asyncio.to_thread(
                     viral_studio_download.download_viral_video,
                     source_url,
                     target_source_path,
                 )
+                dl_duration_ms = max(1, int((time.perf_counter() - t_dl_start) * 1000))
                 viral_studio_store.update_item(item_id, {"source_path": source_path})
+            else:
+                dl_duration_ms = 0
 
             manifest = viral_studio_download.get_source_manifest(source_path)
             meta = manifest.get("metadata") or item.get("source_metadata") or {}
@@ -214,13 +266,16 @@ async def process_viral_item(item_id: str) -> Dict[str, Any]:
                 pass
 
             res_info = f", {res_str}" if res_str else ""
+            dl_time_str = f" em {dl_duration_ms}ms" if dl_duration_ms > 0 else ""
             append_item_log(
                 item_id,
                 "DOWNLOAD",
-                f"Download concluído ({file_size_kb} KB{res_info})",
+                f"Download concluído ({file_size_kb} KB{res_info}){dl_time_str}",
                 details={
                     "source_path": source_path,
                     "resolution": res_str or "unknown",
+                    "file_size_kb": file_size_kb,
+                    "duration_ms": dl_duration_ms,
                     "title": meta.get("title", ""),
                     "has_caption": bool(meta.get("description") or meta.get("caption")),
                     "uploader": meta.get("uploader", ""),
@@ -231,9 +286,16 @@ async def process_viral_item(item_id: str) -> Dict[str, Any]:
             item = viral_studio_store.get_item_or_raise(item_id)
 
             # ------------------------------------------------------------------
-            # Stage 2: Multi-Signal Context Extraction & AI Commercial Copy
+            # 2. Context Extraction (PySceneDetect keyframes + Whisper + metadata)
             # ------------------------------------------------------------------
             viral_studio_store.update_item(item_id, {"status": "ANALYZING"})
+            from clippyme.pipeline.hardware import WHISPER_DEVICE, WHISPER_MODEL, GPU_BACKEND, CUDA_AVAILABLE
+            model_info = f"{WHISPER_MODEL} via {GPU_BACKEND}" if (WHISPER_DEVICE == "cuda" and CUDA_AVAILABLE) else f"{WHISPER_MODEL} via CPU"
+            append_item_log(
+                item_id,
+                "ANALYZING",
+                f"Analisando vídeo: extraindo cenas e transcrevendo áudio com Whisper ({model_info})...",
+            )
             brand_obj = Brand.model_validate(brand_dict)
             item_obj = ViralItem.model_validate(item)
 
@@ -279,6 +341,8 @@ async def process_viral_item(item_id: str) -> Dict[str, Any]:
 
             copy_data = item.get("ai_copy")
             if not copy_data:
+                keyframes_count = len(getattr(video_context, "keyframes", [])) if video_context else 0
+                _log_ai_routing(item_id, model_override, keyframes_count=keyframes_count)
                 copy_kwargs: Dict[str, Any] = {
                     "brand": brand_obj,
                     "item": item_obj,
@@ -302,6 +366,15 @@ async def process_viral_item(item_id: str) -> Dict[str, Any]:
                             copy_data = await viral_studio_copy.generate_affiliate_copy(**copy_kwargs)
                     else:
                         raise
+                except Exception as ai_exc:
+                    append_item_log(
+                        item_id,
+                        "AI_ERROR",
+                        f"Falha na geração de copy com IA: {str(ai_exc)}",
+                        level="error",
+                        details={"error": str(ai_exc)},
+                    )
+                    raise
 
             copy_headline = (
                 copy_data.get("selected_headline")
@@ -344,6 +417,7 @@ async def process_viral_item(item_id: str) -> Dict[str, Any]:
                     "caption": caption,
                     "ai_copy": copy_data.model_dump() if hasattr(copy_data, "model_dump") else copy_data,
                     "ai_context_summary": context_summary,
+                    "ai_telemetry": ai_telemetry,
                     "keyframe_urls": keyframe_urls or refreshed_item.get("keyframe_urls", []),
                 },
             )
@@ -385,6 +459,7 @@ async def process_viral_item(item_id: str) -> Dict[str, Any]:
                 },
             )
 
+            t_render_start = time.perf_counter()
             rendered_path = await asyncio.to_thread(
                 viral_studio_renderer.render_viral_video,
                 source_path=source_path,
@@ -394,12 +469,18 @@ async def process_viral_item(item_id: str) -> Dict[str, Any]:
                 output_path=target_render_path,
                 watermark=template_obj.watermark_enabled,
             )
+            render_duration_ms = max(1, int((time.perf_counter() - t_render_start) * 1000))
+            render_size_kb = round(os.path.getsize(rendered_path) / 1024, 1) if os.path.isfile(rendered_path) else 0
 
             append_item_log(
                 item_id,
                 "COMPLETE",
-                f"Vídeo renderizado com sucesso e pronto para revisão",
-                details={"rendered_path": rendered_path},
+                f"Vídeo renderizado com sucesso ({render_size_kb} KB em {render_duration_ms}ms) e pronto para revisão",
+                details={
+                    "rendered_path": rendered_path,
+                    "file_size_kb": render_size_kb,
+                    "render_duration_ms": render_duration_ms,
+                },
             )
 
             # Final success state: READY_FOR_REVIEW
@@ -533,6 +614,7 @@ async def _rerender_item(
     )
 
     target_render_path = _resolve_render_path(batch_id, item_id)
+    t_rerender_start = time.perf_counter()
     rendered_path = await asyncio.to_thread(
         viral_studio_renderer.render_viral_video,
         source_path=source_path,
@@ -542,12 +624,18 @@ async def _rerender_item(
         output_path=target_render_path,
         watermark=render_watermark,
     )
+    rerender_duration_ms = max(1, int((time.perf_counter() - t_rerender_start) * 1000))
+    render_size_kb = round(os.path.getsize(rendered_path) / 1024, 1) if os.path.isfile(rendered_path) else 0
 
     append_item_log(
         item_id,
         "RERENDER_COMPLETE",
-        f"Re-renderização concluída com sucesso",
-        details={"rendered_path": rendered_path},
+        f"Re-renderização concluída com sucesso ({render_size_kb} KB em {rerender_duration_ms}ms)",
+        details={
+            "rendered_path": rendered_path,
+            "file_size_kb": render_size_kb,
+            "render_duration_ms": rerender_duration_ms,
+        },
     )
 
     updated = viral_studio_store.update_item(
@@ -682,6 +770,139 @@ async def publish_viral_items(
         "successful": sum(r["status"] in {"published", "scheduled"} for r in results),
         "failed": sum(r["status"] == "failed" for r in results),
     }
+
+
+async def regenerate_item_copy(
+    item_id: str,
+    model: Optional[str] = None,
+    manual_instructions: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Regenerate commercial copy for an item with a selected model and optional instructions."""
+    item = viral_studio_store.get_item_or_raise(item_id)
+    batch_id = item.get("batch_id") or "default"
+    brand_id = item.get("brand_id") or DEFAULT_BRAND.id
+    brand_dict = viral_studio_store.get_brand(brand_id) or DEFAULT_BRAND.model_dump()
+    brand_obj = Brand.model_validate(brand_dict)
+
+    source_path = item.get("source_path") or _resolve_source_path(batch_id, item_id)
+    if not os.path.isfile(source_path) or os.path.getsize(source_path) == 0:
+        source_path = None
+
+    item_update: Dict[str, Any] = {}
+    if manual_instructions is not None:
+        item_update["manual_instructions"] = manual_instructions
+        item_update["additional_instructions"] = manual_instructions
+        item["manual_instructions"] = manual_instructions
+        item["additional_instructions"] = manual_instructions
+    if model is not None:
+        item_update["model"] = model
+        item["model"] = model
+
+    # Reset ai_copy, headlines, and caption on payload so generate_affiliate_copy won't return cached or stale copy
+    item_for_copy = dict(item)
+    item_for_copy["ai_copy"] = None
+    item_for_copy["selected_headline"] = None
+    item_for_copy["manual_headline"] = None
+    item_for_copy["caption"] = None
+    item_obj = ViralItem.model_validate(item_for_copy)
+
+    video_context = None
+    keyframes_dir = os.path.join(_get_output_dir(), "viral_studio", batch_id, item_id, "keyframes")
+    if source_path and os.path.isfile(source_path):
+        try:
+            video_context = viral_studio_context.extract_viral_context(
+                video_path=source_path,
+                source_metadata=item.get("source_metadata") or {},
+                keyframes_dir=keyframes_dir,
+                batch_id=batch_id,
+                item_id=item_id,
+            )
+        except Exception as exc:
+            logger.debug("Context re-extraction skipped: %s", exc)
+
+    effective_model = model or item.get("model")
+    if not effective_model and batch_id:
+        batch_dict = viral_studio_store.get_batch(batch_id)
+        if batch_dict:
+            effective_model = batch_dict.get("model")
+
+    keyframes_count = len(getattr(video_context, "keyframes", [])) if video_context else 0
+    _log_ai_routing(item_id, effective_model, keyframes_count=keyframes_count)
+
+    try:
+        copy_data = await viral_studio_copy.generate_affiliate_copy(
+            brand=brand_obj,
+            item=item_obj,
+            video_path=source_path,
+            model=effective_model,
+            video_context=video_context,
+        )
+    except Exception as exc:
+        logger.error("Failed regenerating copy for item %s: %s", item_id, exc)
+        append_item_log(
+            item_id,
+            "AI_ERROR",
+            f"Falha ao regerar copy com IA: {str(exc)}",
+            level="error",
+            details={"error": str(exc)},
+        )
+        raise
+
+    copy_headline = (
+        copy_data.get("selected_headline")
+        if isinstance(copy_data, dict)
+        else getattr(copy_data, "selected_headline", None)
+    )
+    copy_caption = (
+        copy_data.get("caption")
+        if isinstance(copy_data, dict)
+        else getattr(copy_data, "caption", None)
+    )
+    copy_product = (
+        copy_data.get("product")
+        if isinstance(copy_data, dict)
+        else getattr(copy_data, "product", "Produto")
+    )
+
+    selected_headline = copy_headline or "Achadinho Imperdível! 😱"
+    caption = copy_caption or f"Confira no link!\n📌 Produto {item.get('product_code') or ''}"
+
+    refreshed_item = viral_studio_store.get_item(item_id) or {}
+    ai_telemetry = refreshed_item.get("ai_telemetry") or (
+        item_obj.ai_telemetry if hasattr(item_obj, "ai_telemetry") else None
+    )
+
+    item_update.update({
+        "selected_headline": selected_headline,
+        "manual_headline": None,
+        "caption": caption,
+        "ai_copy": copy_data.model_dump() if hasattr(copy_data, "model_dump") else copy_data,
+        "ai_telemetry": ai_telemetry,
+    })
+
+
+    updated_item = viral_studio_store.update_item(item_id, item_update)
+
+    log_details: Dict[str, Any] = {
+        "selected_headline": selected_headline,
+        "headlines_count": len(copy_data.get("headlines") if isinstance(copy_data, dict) else copy_data.headlines),
+    }
+    if ai_telemetry and isinstance(ai_telemetry, dict):
+        log_details.update({
+            "model": ai_telemetry.get("model"),
+            "total_tokens": ai_telemetry.get("total_tokens"),
+            "latency_ms": ai_telemetry.get("latency_ms"),
+            "estimated_cost_usd": ai_telemetry.get("estimated_cost_usd"),
+        })
+
+    append_item_log(
+        item_id,
+        "AI_COPY",
+        f"Copy comercial regerada com sucesso para '{copy_product}'" + (f" ({ai_telemetry.get('model', 'gemini')} · {ai_telemetry.get('latency_ms', 0)}ms)" if ai_telemetry else ""),
+        details=log_details,
+    )
+
+    return updated_item
 
 
 def main(argv: Optional[List[str]] = None) -> int:

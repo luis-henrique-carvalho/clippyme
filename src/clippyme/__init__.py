@@ -1,6 +1,8 @@
-# Pre-initialize PyTorch runtime before CTranslate2/ONNX Runtime to avoid
-# duplicate LLVM CommandLine options registration on ROCm/HIP.
-try:
-    import torch  # noqa: F401
-except ImportError:
-    pass
+import os
+
+# Pre-initialize PyTorch runtime when needed, unless running isolated worker
+if os.getenv("CLIPPYME_NO_TORCH_PREINIT") != "1":
+    try:
+        import torch  # noqa: F401
+    except ImportError:
+        pass

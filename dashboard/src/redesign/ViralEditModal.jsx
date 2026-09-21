@@ -8,6 +8,8 @@ import { createPortal } from 'react-dom';
 import { Icon, Btn } from './primitives';
 import { useModalA11y } from './useModalA11y';
 import { viralVideoSrc } from './viralApi';
+import { getLocalAIModels, regenerateItemCopy } from './realApi';
+import { AI_MODELS } from './data';
 
 export function ViralEditModal({ item, brand, template, onClose, onSave, onReRender, onApprove, pushToast }) {
   const [zoomedKeyframe, setZoomedKeyframe] = useState(null); // URL string of zoomed keyframe
@@ -41,8 +43,18 @@ export function ViralEditModal({ item, brand, template, onClose, onSave, onReRen
   const [reRendering, setReRendering] = useState(false);
   const [saving, setSaving] = useState(false);
 
+  // AI Copy Regeneration state
+  const [localAI, setLocalAI] = useState(null);
+  const [regenModel, setRegenModel] = useState('');
+  const [regenInstructions, setRegenInstructions] = useState('');
+  const [regeneratingCopy, setRegeneratingCopy] = useState(false);
+  const [headlinesList, setHeadlinesList] = useState(item.ai_copy?.headlines || []);
+
+  useEffect(() => {
+    getLocalAIModels().then((data) => { if (data) setLocalAI(data); }).catch(() => {});
+  }, []);
+
   const videoUrl = viralVideoSrc(item);
-  const headlinesList = item.ai_copy?.headlines || [];
 
   // Multi-Signal context resolution
   const keyframeUrls = (item.keyframe_urls && item.keyframe_urls.length > 0)
@@ -70,13 +82,26 @@ export function ViralEditModal({ item, brand, template, onClose, onSave, onReRen
   };
 
   // AI Telemetry resolution
+  const routingLog = (item.logs || []).find((l) => String(l.stage || '').toUpperCase() === 'AI_ROUTING');
+  const configuredModel = item.model || routingLog?.details?.target_model || routingLog?.details?.model || '';
   const aiTelemetry = item.ai_telemetry || {};
-  const modelUsed = aiTelemetry.model || aiTelemetry.model_used || 'gemini-2.5-flash';
-  const promptTokens = Number(aiTelemetry.prompt_tokens || 0);
-  const candidateTokens = Number(aiTelemetry.candidate_tokens || 0);
-  const totalTokens = Number(aiTelemetry.total_tokens || (promptTokens + candidateTokens));
-  const estimatedCost = Number(aiTelemetry.estimated_cost_usd ?? aiTelemetry.cost_usd ?? 0);
-  const latencyMs = Number(aiTelemetry.latency_ms || 0);
+  const hasTelemetry = Boolean(
+    aiTelemetry.model ||
+    aiTelemetry.model_used ||
+    (aiTelemetry.total_tokens != null && Number(aiTelemetry.total_tokens) > 0) ||
+    (aiTelemetry.latency_ms != null && Number(aiTelemetry.latency_ms) > 0) ||
+    aiTelemetry.raw_response
+  );
+  const modelUsed = aiTelemetry.model || aiTelemetry.model_used || configuredModel || (item.status === 'COMPLETED' ? 'gemini-2.5-flash' : 'Padrão da Configuração');
+  const promptTokens = aiTelemetry.prompt_tokens != null ? Number(aiTelemetry.prompt_tokens) : null;
+  const candidateTokens = aiTelemetry.candidate_tokens != null ? Number(aiTelemetry.candidate_tokens) : null;
+  const totalTokens = aiTelemetry.total_tokens != null
+    ? Number(aiTelemetry.total_tokens)
+    : ((promptTokens != null || candidateTokens != null) ? (promptTokens || 0) + (candidateTokens || 0) : null);
+  const estimatedCost = (aiTelemetry.estimated_cost_usd != null || aiTelemetry.cost_usd != null)
+    ? Number(aiTelemetry.estimated_cost_usd ?? aiTelemetry.cost_usd)
+    : null;
+  const latencyMs = aiTelemetry.latency_ms != null ? Number(aiTelemetry.latency_ms) : null;
   const fullPrompt = typeof aiTelemetry.prompt === 'string'
     ? aiTelemetry.prompt
     : (aiTelemetry.prompt ? JSON.stringify(aiTelemetry.prompt, null, 2) : '');
@@ -118,6 +143,42 @@ export function ViralEditModal({ item, brand, template, onClose, onSave, onReRen
       pushToast?.('error', `Erro ao re-renderizar: ${err.message}`);
     } finally {
       setReRendering(false);
+    }
+  };
+
+  const handleRegenerateCopy = async () => {
+    setRegeneratingCopy(true);
+    try {
+      const updated = await regenerateItemCopy(item.id, {
+        model: regenModel || undefined,
+        manual_instructions: regenInstructions.trim() || undefined,
+      });
+      if (updated) {
+        if (updated.selected_headline) {
+          setSelectedHeadline(updated.selected_headline);
+          setCustomHeadline(updated.selected_headline);
+        }
+        if (updated.caption) {
+          setCaption(updated.caption);
+        }
+        if (updated.ai_copy?.headlines) {
+          setHeadlinesList(updated.ai_copy.headlines);
+          if (item.ai_copy) {
+            item.ai_copy = updated.ai_copy;
+          }
+        }
+        if (updated.logs) {
+          item.logs = updated.logs;
+        }
+        if (updated.ai_telemetry) {
+          item.ai_telemetry = updated.ai_telemetry;
+        }
+      }
+      pushToast?.('success', 'Copy comercial regerada com sucesso!');
+    } catch (err) {
+      pushToast?.('error', `Erro ao regerar copy: ${err.message}`);
+    } finally {
+      setRegeneratingCopy(false);
     }
   };
 
@@ -320,6 +381,103 @@ export function ViralEditModal({ item, brand, template, onClose, onSave, onReRen
                     />
                     <div style={{ fontSize: 'var(--text-3xs)', color: 'var(--fg-3)', marginTop: 6 }}>
                       Ao alterar a headline, clique em <strong>Re-renderizar vídeo</strong> para gerar o novo MP4 com o template visual.
+                    </div>
+                  </div>
+
+                  {/* Card: Regerar Copy com IA */}
+                  <div
+                    style={{
+                      background: 'var(--bg-2)',
+                      border: '1px solid var(--line-1)',
+                      borderRadius: 'var(--r-md)',
+                      padding: '14px 16px',
+                      marginTop: 18,
+                      display: 'flex',
+                      flexDirection: 'column',
+                      gap: 10,
+                    }}
+                  >
+                    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+                      <span style={{ fontSize: 'var(--text-xs)', fontWeight: 600, color: 'var(--fg-1)', display: 'inline-flex', alignItems: 'center', gap: 6 }}>
+                        <Icon n="sparkles" style={{ width: 14, height: 14, color: 'var(--brand-teal, #34d399)' }} />
+                        Regerar Copy Comercial com IA
+                      </span>
+                    </div>
+                    <div style={{ fontSize: 'var(--text-3xs)', color: 'var(--fg-3)' }}>
+                      Re-execute a geração de headlines e legenda usando outra LLM conectada ou fornecendo instruções manuais.
+                    </div>
+
+                    <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
+                      <div>
+                        <label style={{ display: 'block', fontSize: 'var(--text-3xs)', color: 'var(--fg-3)', textTransform: 'uppercase', marginBottom: 4, fontWeight: 600 }}>
+                          Modelo de IA
+                        </label>
+                        <select
+                          className="key-input"
+                          style={{ width: '100%', height: 36, fontSize: 'var(--text-xs)' }}
+                          value={regenModel}
+                          onChange={(e) => setRegenModel(e.target.value)}
+                        >
+                          <option value="">Padrão (Configurações)</option>
+
+                          {/* LM Studio Conectado */}
+                          {localAI?.lm_studio?.online && localAI.lm_studio.models?.length > 0 && (
+                            <optgroup label={`🟢 LM Studio Conectado (${localAI.lm_studio.models.length})`}>
+                              {localAI.lm_studio.models.map((m) => (
+                                <option key={`lmstudio:${m.id}`} value={`lmstudio:${m.id}`}>
+                                  {m.name} (LM Studio Local ⚡)
+                                </option>
+                              ))}
+                            </optgroup>
+                          )}
+
+                          {/* Ollama Conectado */}
+                          {localAI?.ollama?.online && localAI.ollama.models?.length > 0 && (
+                            <optgroup label={`🟢 Ollama Conectado (${localAI.ollama.models.length})`}>
+                              {localAI.ollama.models.map((m) => (
+                                <option key={`ollama:${m.id || m.name}`} value={`ollama:${m.id || m.name}`}>
+                                  {m.name} (Ollama Local ⚡)
+                                </option>
+                              ))}
+                            </optgroup>
+                          )}
+
+                          {/* Gemini Nuvem */}
+                          {AI_MODELS.map((group) => (
+                            <optgroup key={group.group} label={group.group}>
+                              {group.options.map(([val, lbl]) => (
+                                <option key={val} value={val}>{lbl}</option>
+                              ))}
+                            </optgroup>
+                          ))}
+                        </select>
+                      </div>
+
+                      <div>
+                        <label style={{ display: 'block', fontSize: 'var(--text-3xs)', color: 'var(--fg-3)', textTransform: 'uppercase', marginBottom: 4, fontWeight: 600 }}>
+                          Instruções Opcionais
+                        </label>
+                        <input
+                          type="text"
+                          className="key-input"
+                          style={{ width: '100%', height: 36, fontSize: 'var(--text-xs)' }}
+                          value={regenInstructions}
+                          onChange={(e) => setRegenInstructions(e.target.value)}
+                          placeholder="Ex: Focar no desconto, tom divertido..."
+                        />
+                      </div>
+                    </div>
+
+                    <div style={{ display: 'flex', justifyContent: 'flex-end', marginTop: 4 }}>
+                      <Btn
+                        variant="secondary"
+                        size="sm"
+                        icon="sparkles"
+                        loading={regeneratingCopy}
+                        onClick={handleRegenerateCopy}
+                      >
+                        {regeneratingCopy ? 'Regerando copy…' : '✨ Regerar Copy'}
+                      </Btn>
                     </div>
                   </div>
                 </div>
@@ -631,23 +789,23 @@ export function ViralEditModal({ item, brand, template, onClose, onSave, onReRen
                         </div>
                         <div style={{ background: 'var(--bg-2)', border: '1px solid var(--line-1)', borderRadius: 'var(--r-sm)', padding: '8px 12px' }}>
                           <span style={{ fontSize: 'var(--text-3xs)', color: 'var(--fg-3)', textTransform: 'uppercase', fontWeight: 600, display: 'block', marginBottom: 2 }}>Prompt Tokens</span>
-                          <span style={{ fontSize: 'var(--text-sm)', fontWeight: 700, color: 'var(--fg-1)' }}>{promptTokens.toLocaleString()}</span>
+                          <span style={{ fontSize: 'var(--text-sm)', fontWeight: 700, color: 'var(--fg-1)' }}>{hasTelemetry && promptTokens != null ? promptTokens.toLocaleString() : '—'}</span>
                         </div>
                         <div style={{ background: 'var(--bg-2)', border: '1px solid var(--line-1)', borderRadius: 'var(--r-sm)', padding: '8px 12px' }}>
                           <span style={{ fontSize: 'var(--text-3xs)', color: 'var(--fg-3)', textTransform: 'uppercase', fontWeight: 600, display: 'block', marginBottom: 2 }}>Candidate Tokens</span>
-                          <span style={{ fontSize: 'var(--text-sm)', fontWeight: 700, color: 'var(--fg-1)' }}>{candidateTokens.toLocaleString()}</span>
+                          <span style={{ fontSize: 'var(--text-sm)', fontWeight: 700, color: 'var(--fg-1)' }}>{hasTelemetry && candidateTokens != null ? candidateTokens.toLocaleString() : '—'}</span>
                         </div>
                         <div style={{ background: 'var(--bg-2)', border: '1px solid var(--line-1)', borderRadius: 'var(--r-sm)', padding: '8px 12px' }}>
                           <span style={{ fontSize: 'var(--text-3xs)', color: 'var(--fg-3)', textTransform: 'uppercase', fontWeight: 600, display: 'block', marginBottom: 2 }}>Total Tokens</span>
-                          <span style={{ fontSize: 'var(--text-sm)', fontWeight: 700, color: 'var(--brand-blue)' }}>{totalTokens.toLocaleString()}</span>
+                          <span style={{ fontSize: 'var(--text-sm)', fontWeight: 700, color: 'var(--brand-blue)' }}>{hasTelemetry && totalTokens != null ? totalTokens.toLocaleString() : '—'}</span>
                         </div>
                         <div style={{ background: 'var(--bg-2)', border: '1px solid var(--line-1)', borderRadius: 'var(--r-sm)', padding: '8px 12px' }}>
                           <span style={{ fontSize: 'var(--text-3xs)', color: 'var(--fg-3)', textTransform: 'uppercase', fontWeight: 600, display: 'block', marginBottom: 2 }}>Custo Est. (USD)</span>
-                          <span style={{ fontSize: 'var(--text-sm)', fontWeight: 700, color: 'var(--brand-teal, #34d399)' }}>${Number(estimatedCost).toFixed(5)}</span>
+                          <span style={{ fontSize: 'var(--text-sm)', fontWeight: 700, color: 'var(--brand-teal, #34d399)' }}>{hasTelemetry && estimatedCost != null ? `$${estimatedCost.toFixed(5)}` : '—'}</span>
                         </div>
                         <div style={{ background: 'var(--bg-2)', border: '1px solid var(--line-1)', borderRadius: 'var(--r-sm)', padding: '8px 12px' }}>
                           <span style={{ fontSize: 'var(--text-3xs)', color: 'var(--fg-3)', textTransform: 'uppercase', fontWeight: 600, display: 'block', marginBottom: 2 }}>Latência</span>
-                          <span style={{ fontSize: 'var(--text-sm)', fontWeight: 700, color: 'var(--brand-amber, #fbbf24)' }}>{latencyMs} ms</span>
+                          <span style={{ fontSize: 'var(--text-sm)', fontWeight: 700, color: 'var(--brand-amber, #fbbf24)' }}>{hasTelemetry && latencyMs != null ? `${latencyMs} ms` : '—'}</span>
                         </div>
                       </div>
 
@@ -729,10 +887,20 @@ export function ViralEditModal({ item, brand, template, onClose, onSave, onReRen
 
                   {/* SUB-TAB 3: LINHA DO TEMPO (LOGS CRONOLÓGICOS) */}
                   {obsSubTab === 'timeline' && (
-                    <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-                      <div style={{ fontSize: 'var(--text-xs)', color: 'var(--fg-3)' }}>
-                        Histórico cronológico de telemetria e atividades do pipeline:
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+                      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 8 }}>
+                        <div style={{ fontSize: 'var(--text-xs)', color: 'var(--fg-3)' }}>
+                          Histórico cronológico de telemetria e etapas do pipeline:
+                        </div>
+                        {item.logs && item.logs.length > 0 && (
+                          <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
+                            <span style={{ fontSize: 'var(--text-3xs)', background: 'var(--bg-2)', border: '1px solid var(--line-1)', padding: '2px 8px', borderRadius: 'var(--r-xs)', color: 'var(--fg-2)' }}>
+                              {item.logs.length} eventos registrados
+                            </span>
+                          </div>
+                        )}
                       </div>
+
                       <div
                         style={{
                           background: '#090d13',
@@ -741,11 +909,11 @@ export function ViralEditModal({ item, brand, template, onClose, onSave, onReRen
                           padding: '12px 14px',
                           fontFamily: 'var(--font-mono, monospace)',
                           fontSize: 'var(--text-2xs)',
-                          maxHeight: 280,
+                          maxHeight: 320,
                           overflowY: 'auto',
                           display: 'flex',
                           flexDirection: 'column',
-                          gap: 8,
+                          gap: 10,
                         }}
                       >
                         {item.logs && item.logs.length > 0 ? (
@@ -753,11 +921,12 @@ export function ViralEditModal({ item, brand, template, onClose, onSave, onReRen
                             const stageUpper = String(log.stage || '').toUpperCase();
                             const isError = log.level === 'error' || stageUpper === 'ERROR' || stageUpper === 'PUBLISH_ERROR' || stageUpper === 'FAILED';
                             const isWarn = log.level === 'warn';
-                            const isSuccess = stageUpper === 'COMPLETE' || stageUpper === 'PUBLISHED' || stageUpper === 'APPROVE' || stageUpper === 'APPROVED' || stageUpper === 'RENDER_COMPLETE';
-                            const isAi = stageUpper === 'AI_COPY';
-                            const isContext = stageUpper === 'CONTEXT';
-                            const isRender = stageUpper === 'RENDER' || stageUpper === 'RENDERING';
-                            const isDownload = stageUpper === 'DOWNLOAD' || stageUpper === 'DOWNLOADING';
+                            const isSuccess = stageUpper === 'COMPLETE' || stageUpper === 'PUBLISHED' || stageUpper === 'APPROVE' || stageUpper === 'APPROVED' || stageUpper === 'RENDER_COMPLETE' || stageUpper === 'RERENDER_COMPLETE';
+                            const isAi = stageUpper.startsWith('AI_');
+                            const isContext = stageUpper === 'CONTEXT' || stageUpper === 'SCENE_DETECTION';
+                            const isRender = stageUpper === 'RENDER' || stageUpper === 'RENDERING' || stageUpper === 'RERENDER';
+                            const isDownload = stageUpper === 'DOWNLOAD' || stageUpper === 'DOWNLOADING' || stageUpper === 'COOKIE_RESOLVED';
+                            
                             const stageColor = isError ? 'var(--brand-danger, #f87171)'
                               : isWarn ? 'var(--brand-amber, #fbbf24)'
                               : isSuccess ? 'var(--brand-teal, #34d399)'
@@ -766,16 +935,36 @@ export function ViralEditModal({ item, brand, template, onClose, onSave, onReRen
                               : isRender ? '#a78bfa'
                               : isDownload ? '#60a5fa'
                               : 'var(--blue-400, #60a5fa)';
+
+                            const stageBg = isError ? 'rgba(239, 68, 68, 0.12)'
+                              : isWarn ? 'rgba(245, 158, 11, 0.12)'
+                              : isSuccess ? 'rgba(52, 211, 153, 0.12)'
+                              : isAi ? 'rgba(192, 132, 252, 0.12)'
+                              : isContext ? 'rgba(56, 189, 248, 0.12)'
+                              : isRender ? 'rgba(167, 139, 250, 0.12)'
+                              : 'rgba(96, 165, 250, 0.12)';
+
                             const timeStr = log.timestamp ? new Date(log.timestamp).toLocaleTimeString() : '--:--:--';
+                            const hasDetails = log.details && Object.keys(log.details).length > 0;
 
                             return (
-                              <div key={idx} style={{ lineHeight: 1.4, wordBreak: 'break-word' }}>
-                                <span style={{ color: 'var(--fg-3)', marginRight: 8 }}>[{timeStr}]</span>
-                                <span style={{ color: stageColor, fontWeight: 600, marginRight: 8 }}>[{log.stage || 'INFO'}]</span>
-                                <span style={{ color: isError ? 'var(--brand-danger, #f87171)' : 'var(--fg-1)' }}>{log.message}</span>
-                                {log.details && (
-                                  <div style={{ paddingLeft: 16, color: 'var(--fg-3)', fontSize: 'var(--text-3xs)', marginTop: 2 }}>
-                                    {typeof log.details === 'object' ? JSON.stringify(log.details) : String(log.details)}
+                              <div key={idx} style={{ lineHeight: 1.4, wordBreak: 'break-word', borderBottom: idx < item.logs.length - 1 ? '1px solid rgba(255,255,255,0.04)' : 'none', paddingBottom: 8 }}>
+                                <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 6, flexWrap: 'wrap' }}>
+                                  <div>
+                                    <span style={{ color: 'var(--fg-3)', marginRight: 6 }}>[{timeStr}]</span>
+                                    <span style={{ color: stageColor, background: stageBg, padding: '1px 6px', borderRadius: 4, fontWeight: 600, marginRight: 8, fontSize: 'var(--text-3xs)' }}>
+                                      [{log.stage || 'INFO'}]
+                                    </span>
+                                    <span style={{ color: isError ? 'var(--brand-danger, #f87171)' : 'var(--fg-1)', fontWeight: isError || isSuccess ? 600 : 400 }}>
+                                      {log.message}
+                                    </span>
+                                  </div>
+                                </div>
+                                {hasDetails && (
+                                  <div style={{ marginTop: 4, marginLeft: 8, background: 'rgba(255,255,255,0.02)', border: '1px solid rgba(255,255,255,0.05)', borderRadius: 4, padding: '4px 8px' }}>
+                                    <pre style={{ margin: 0, fontSize: 'var(--text-3xs)', color: 'var(--fg-3)', whiteSpace: 'pre-wrap', wordBreak: 'break-all' }}>
+                                      {typeof log.details === 'object' ? JSON.stringify(log.details, null, 2) : String(log.details)}
+                                    </pre>
                                   </div>
                                 )}
                               </div>

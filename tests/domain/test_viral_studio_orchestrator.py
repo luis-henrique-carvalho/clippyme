@@ -2,9 +2,11 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import uuid
 from unittest.mock import AsyncMock, MagicMock, patch
+
 
 import pytest
 
@@ -18,7 +20,7 @@ from clippyme.domain import (
     viral_studio_orchestrator,
     viral_studio_store,
 )
-from clippyme.domain.errors import NotFoundError, ValidationError
+from clippyme.domain.errors import ClippyMeError, NotFoundError, ValidationError
 
 
 @pytest.fixture
@@ -503,5 +505,169 @@ async def test_process_viral_item_passes_model_to_copy(tmp_store_and_output, mon
     res = await viral_studio_orchestrator.process_viral_item(item_id)
     assert res["status"] == "READY_FOR_REVIEW"
     assert captured_model == ["ollama:llama3.2"]
+
+
+@pytest.mark.asyncio
+async def test_process_viral_item_records_ai_routing_and_ai_error(tmp_store_and_output, monkeypatch):
+    """process_viral_item logs AI_ROUTING and on error logs AI_ERROR and sets status FAILED."""
+    batch = viral_studio_store.create_batch({
+        "brand_id": "vale-o-clique",
+        "model": "lmstudio:google/gemma-4-12b-qat",
+        "items": [
+            {"source_url": "https://instagram.com/reel/ERR_TEST"},
+        ],
+    })
+    item_id = batch["items"][0]["id"]
+
+    def fake_dl(url, out_path, timeout=120):
+        os.makedirs(os.path.dirname(out_path), exist_ok=True)
+        with open(out_path, "wb") as f:
+            f.write(b"video data")
+        return out_path
+
+    async def fake_copy_fail(*args, **kwargs):
+        raise ClippyMeError("Cannot connect to LM Studio at http://localhost:1234")
+
+    monkeypatch.setattr("clippyme.domain.viral_studio_download.download_viral_video", fake_dl)
+    monkeypatch.setattr("clippyme.domain.viral_studio_copy.generate_affiliate_copy", fake_copy_fail)
+
+    res = await viral_studio_orchestrator.process_viral_item(item_id)
+    assert res["status"] == "FAILED"
+    assert "Cannot connect to LM Studio" in res["error_message"]
+
+    item_in_store = viral_studio_store.get_item(item_id)
+    logs = item_in_store.get("logs") or []
+    stages = [l["stage"] for l in logs]
+    assert "AI_ROUTING" in stages
+    assert "AI_ERROR" in stages
+    ai_routing_log = next(l for l in logs if l["stage"] == "AI_ROUTING")
+    assert ai_routing_log["details"]["provider"] == "lmstudio"
+    assert ai_routing_log["details"]["target_model"] == "google/gemma-4-12b-qat"
+
+
+@pytest.mark.asyncio
+async def test_regenerate_item_copy_success(tmp_store_and_output, monkeypatch):
+    """regenerate_item_copy updates copy, telemetry, and logs on an existing item."""
+    batch = viral_studio_store.create_batch({
+        "brand_id": "vale-o-clique",
+        "items": [
+            {"source_url": "https://instagram.com/reel/REGEN_TEST", "product_code": "PROD-10"},
+        ],
+    })
+    item_id = batch["items"][0]["id"]
+    viral_studio_store.update_item(item_id, {
+        "status": "READY_FOR_REVIEW",
+        "selected_headline": "Old Headline",
+        "caption": "Old Caption",
+        "ai_copy": {
+            "product": "Old Prod",
+            "headlines": ["Old Headline"],
+            "selected_headline": "Old Headline",
+            "caption": "Old Caption",
+            "hashtags": ["#old"],
+        },
+    })
+
+    async def fake_copy(brand, item, video_path=None, model=None, video_context=None):
+        return AICopyData(
+            product="Novo Produto Regerado",
+            product_description="Descricao nova",
+            headlines=["Nova Headline 1", "Nova Headline 2", "Nova Headline 3", "Nova Headline 4", "Nova Headline 5"],
+            selected_headline="Nova Headline 1",
+            caption="Nova Legenda Regerada 📌 Produto PROD-10",
+            hashtags=["#novo", "#achadinhos"],
+        )
+
+    monkeypatch.setattr("clippyme.domain.viral_studio_copy.generate_affiliate_copy", fake_copy)
+
+    res = await viral_studio_orchestrator.regenerate_item_copy(
+        item_id,
+        model="lmstudio:google/gemma-4-12b-qat",
+        manual_instructions="Focar na durabilidade",
+    )
+
+    assert res["selected_headline"] == "Nova Headline 1"
+    assert "Nova Legenda Regerada" in res["caption"]
+    assert res["ai_copy"]["product"] == "Novo Produto Regerado"
+    assert res["model"] == "lmstudio:google/gemma-4-12b-qat"
+    assert res["manual_instructions"] == "Focar na durabilidade"
+
+    item_in_store = viral_studio_store.get_item(item_id)
+    assert item_in_store["selected_headline"] == "Nova Headline 1"
+    logs = item_in_store.get("logs") or []
+    stages = [l["stage"] for l in logs]
+    assert "AI_ROUTING" in stages
+    assert "AI_COPY" in stages
+
+
+@pytest.mark.asyncio
+async def test_regenerate_item_copy_overwrites_stale_headlines_end_to_end(tmp_store_and_output, monkeypatch):
+    """regenerate_item_copy must overwrite existing selected_headline and caption with new LLM output."""
+    batch = viral_studio_store.create_batch({
+        "brand_id": "vale-o-clique",
+        "items": [
+            {"source_url": "https://instagram.com/reel/REAL_REGEN", "product_code": "PROD-99"},
+        ],
+    })
+    item_id = batch["items"][0]["id"]
+    viral_studio_store.update_item(item_id, {
+        "status": "READY_FOR_REVIEW",
+        "manual_headline": "Old Manual Headline",
+        "selected_headline": "Old Manual Headline",
+        "caption": "Old Stale Caption",
+        "ai_copy": {
+            "product": "Old Prod",
+            "headlines": ["Old Manual Headline"],
+            "selected_headline": "Old Manual Headline",
+            "caption": "Old Stale Caption",
+            "hashtags": ["#old"],
+        },
+    })
+
+    fake_llm_json = json.dumps({
+        "product": "Produto Fresco e Novo",
+        "product_description": "Nova descricao",
+        "headlines": [
+            "Headline Fresca 1",
+            "Headline Fresca 2",
+            "Headline Fresca 3",
+            "Headline Fresca 4",
+            "Headline Fresca 5",
+        ],
+        "selected_headline": "Headline Fresca 1",
+        "caption": "Nova Legenda Fresca 📌 Produto PROD-99",
+        "hashtags": ["#novo", "#achadinhos"],
+    })
+
+    class FakeResponse:
+        def getcode(self):
+            return 200
+        def read(self):
+            return json.dumps({
+                "choices": [{
+                    "message": {"content": fake_llm_json}
+                }],
+                "usage": {"prompt_tokens": 100, "completion_tokens": 50, "total_tokens": 150}
+            }).encode("utf-8")
+        def __enter__(self):
+            return self
+        def __exit__(self, *args):
+            pass
+
+    monkeypatch.setattr("urllib.request.urlopen", lambda req, timeout=120: FakeResponse())
+
+    res = await viral_studio_orchestrator.regenerate_item_copy(
+        item_id,
+        model="lmstudio:google/gemma-4-12b-qat",
+        manual_instructions="Instrucao nova",
+    )
+
+    # Must NOT keep "Old Manual Headline" or "Old Stale Caption"
+    assert res["selected_headline"] == "Headline Fresca 1"
+    assert res["caption"] == "Nova Legenda Fresca 📌 Produto PROD-99"
+    assert res["ai_copy"]["product"] == "Produto Fresco e Novo"
+    assert res["manual_instructions"] == "Instrucao nova"
+
+
 
 

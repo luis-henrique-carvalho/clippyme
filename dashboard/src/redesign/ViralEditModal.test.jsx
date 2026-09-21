@@ -199,24 +199,37 @@ test('ViralEditModal renders Linha do Tempo with terminal logs', () => {
   expect(screen.getByText(/\[COMPLETE\]/i)).toBeInTheDocument();
 });
 
-test('ViralEditModal renders empty logs state gracefully', () => {
-  const emptyItem = {
-    id: 'item-empty',
-    source_url: 'https://www.tiktok.com/@user/video/1',
-    logs: [],
+test('ViralEditModal displays configured model and dashes for pending items without telemetry', () => {
+  const pendingItem = {
+    id: 'item-pending-bonsai',
+    source_url: 'https://www.instagram.com/reel/C12345/',
+    status: 'ANALYZING',
+    model: 'lmstudio:prism-ml/bonsai-27b',
+    logs: [
+      {
+        timestamp: '2026-09-20T18:00:00Z',
+        stage: 'AI_ROUTING',
+        level: 'info',
+        message: 'Roteando para LM Studio',
+        details: { target_model: 'prism-ml/bonsai-27b' },
+      },
+    ],
   };
 
   render(
     <ViralEditModal
-      item={emptyItem}
+      item={pendingItem}
+      brand={sampleBrand}
       onClose={vi.fn()}
       onSave={vi.fn()}
     />
   );
 
-  fireEvent.click(screen.getByRole('button', { name: /Observabilidade & IA/i }));
-  fireEvent.click(screen.getByRole('tab', { name: /Linha do Tempo/i }));
+  // Switch to Telemetria da LLM
+  fireEvent.click(screen.getByRole('tab', { name: /Telemetria da LLM/i }));
 
-  expect(screen.getByText(/Nenhum log registrado para este item/i)).toBeInTheDocument();
+  expect(screen.getByText('lmstudio:prism-ml/bonsai-27b')).toBeInTheDocument();
+  expect(screen.getAllByText('—').length).toBeGreaterThanOrEqual(4);
 });
+
 

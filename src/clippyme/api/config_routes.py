@@ -13,6 +13,7 @@ bodies are unchanged from their previous inline form in ``app.py``.
 import asyncio
 import contextlib
 import io
+import json
 import os
 import struct
 import tempfile
@@ -91,6 +92,144 @@ def _delete_uploaded_font(name: str) -> bool:
         except FileNotFoundError:
             pass
     return removed
+
+
+def _probe_url_json(url: str, timeout: float = 1.5) -> Optional[dict]:
+    """Perform a synchronous HTTP GET with a short timeout and return parsed JSON or None."""
+    import urllib.error
+    import urllib.request
+
+    req = urllib.request.Request(url, headers={"User-Agent": "ClippyMe/1.0", "Accept": "application/json"})
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            if resp.getcode() == 200:
+                data = resp.read().decode("utf-8", errors="replace")
+                return json.loads(data)
+    except Exception:
+        pass
+    return None
+
+
+_EMBEDDING_PATTERNS = ("embed", "embedding", "bge-", "nomic-embed", "minilm", "text-embedding")
+
+
+def _is_embedding_model(model_name: str) -> bool:
+    s = (model_name or "").lower()
+    return any(p in s for p in _EMBEDDING_PATTERNS)
+
+
+def _probe_lm_studio() -> dict:
+    """Probe LM Studio on configured or default localhost/host.docker.internal endpoints."""
+    configured_base = os.environ.get("LM_STUDIO_BASE_URL") or load_persistent_config().get("LM_STUDIO_BASE_URL")
+    candidates = []
+    if configured_base:
+        candidates.append(str(configured_base).rstrip("/"))
+    candidates.extend([
+        "http://host.docker.internal:1234",
+        "http://localhost:1234",
+        "http://127.0.0.1:1234",
+    ])
+
+    seen_urls = set()
+    for base in candidates:
+        if base in seen_urls:
+            continue
+        seen_urls.add(base)
+        url = f"{base}/v1/models"
+        data = _probe_url_json(url, timeout=1.5)
+        if data and isinstance(data, dict):
+            raw_models = data.get("data", [])
+            models_list = []
+            if isinstance(raw_models, list):
+                for item in raw_models:
+                    if isinstance(item, dict) and item.get("id"):
+                        m_id = str(item["id"])
+                        if not _is_embedding_model(m_id):
+                            models_list.append({"id": m_id, "name": m_id})
+            return {
+                "online": True,
+                "base_url": base,
+                "models": models_list,
+            }
+
+    return {
+        "online": False,
+        "base_url": candidates[0] if candidates else "http://localhost:1234",
+        "models": [],
+    }
+
+
+def _probe_ollama() -> dict:
+    """Probe Ollama on configured or default localhost/host.docker.internal endpoints."""
+    configured_base = os.environ.get("OLLAMA_BASE_URL") or load_persistent_config().get("OLLAMA_BASE_URL")
+    candidates = []
+    if configured_base:
+        candidates.append(str(configured_base).rstrip("/"))
+    candidates.extend([
+        "http://host.docker.internal:11434",
+        "http://localhost:11434",
+        "http://127.0.0.1:11434",
+    ])
+
+    seen_urls = set()
+    for base in candidates:
+        if base in seen_urls:
+            continue
+        seen_urls.add(base)
+        url = f"{base}/api/tags"
+        data = _probe_url_json(url, timeout=1.5)
+        if data and isinstance(data, dict):
+            raw_models = data.get("models", [])
+            models_list = []
+            if isinstance(raw_models, list):
+                for item in raw_models:
+                    if isinstance(item, dict) and item.get("name"):
+                        m_name = str(item["name"])
+                        if not _is_embedding_model(m_name):
+                            models_list.append({"id": m_name, "name": m_name})
+            return {
+                "online": True,
+                "base_url": base,
+                "models": models_list,
+            }
+
+    return {
+        "online": False,
+        "base_url": candidates[0] if candidates else "http://localhost:11434",
+        "models": [],
+    }
+
+
+@router.get("/api/config/local-models")
+async def get_local_models(request: Request):
+    """Probe and return locally available AI models from LM Studio and Ollama."""
+    require_trusted_config_request(request)
+    lm_studio_res, ollama_res = await asyncio.gather(
+        asyncio.to_thread(_probe_lm_studio),
+        asyncio.to_thread(_probe_ollama),
+    )
+
+    combined_models = []
+    for m in lm_studio_res.get("models", []):
+        combined_models.append({
+            "id": f"lmstudio:{m['id']}",
+            "name": m["name"],
+            "provider": "lm_studio",
+            "group": "LM Studio",
+        })
+    for m in ollama_res.get("models", []):
+        combined_models.append({
+            "id": f"ollama:{m['id']}",
+            "name": m["name"],
+            "provider": "ollama",
+            "group": "Ollama",
+        })
+
+    return {
+        "lm_studio": lm_studio_res,
+        "ollama": ollama_res,
+        "models": combined_models,
+    }
 
 
 @router.get("/api/config/models")

@@ -405,3 +405,90 @@ def test_batch_status_syncs_with_item_status(tmp_store):
     assert viral_studio_store.get_batch(batch_id)["status"] == "FAILED"
 
 
+def _mp_worker_update_item(store_dir: str, item_id: str, index: int) -> None:
+    from clippyme.domain import viral_studio_store
+    viral_studio_store.set_store_dir(store_dir)
+    viral_studio_store.append_item_log(item_id, {
+        "stage": "INIT",
+        "message": f"Process {index} start",
+    })
+    viral_studio_store.update_item(item_id, {
+        "status": "READY_FOR_REVIEW",
+        "rendered_path": f"/app/output/item_{index}/rendered.mp4",
+        "selected_headline": f"Headline {index}",
+    })
+    viral_studio_store.append_item_log(item_id, {
+        "stage": "COMPLETE",
+        "message": f"Process {index} done",
+    })
+
+
+def test_cross_process_concurrent_item_updates(tmp_store):
+    """Multiple concurrent worker processes updating different items must not overwrite each other."""
+    import multiprocessing
+    item_count = 6
+    batch = viral_studio_store.create_batch({
+        "brand_id": "vale-o-clique",
+        "items": [
+            {"source_url": f"https://www.instagram.com/reel/proc_{i}/"}
+            for i in range(item_count)
+        ],
+    })
+    batch_id = batch["id"]
+    item_ids = [it["id"] for it in batch["items"]]
+
+    ctx = multiprocessing.get_context("spawn")
+    processes = [
+        ctx.Process(target=_mp_worker_update_item, args=(tmp_store, item_ids[i], i))
+        for i in range(item_count)
+    ]
+    for p in processes:
+        p.start()
+    for p in processes:
+        p.join(timeout=15)
+        assert not p.is_alive()
+        assert p.exitcode == 0
+
+    # Validate that every single item's update was safely preserved
+    refreshed_batch = viral_studio_store.get_batch(batch_id)
+    assert refreshed_batch["status"] == "READY_FOR_REVIEW"
+    for i, it in enumerate(refreshed_batch["items"]):
+        assert it["status"] == "READY_FOR_REVIEW"
+        assert it["rendered_path"] == f"/app/output/item_{i}/rendered.mp4"
+        assert it["selected_headline"] == f"Headline {i}"
+        stages = [log["stage"] for log in it.get("logs", [])]
+        assert "INIT" in stages
+        assert "COMPLETE" in stages
+
+
+def test_store_lock_reentrancy(tmp_store):
+    """store_lock must be safely reentrant without deadlocking."""
+    with viral_studio_store.store_lock():
+        with viral_studio_store.store_lock():
+            brands = viral_studio_store.list_brands()
+            assert len(brands) >= 1
+            with viral_studio_store._STORE_LOCK:
+                templates = viral_studio_store.list_templates()
+                assert len(templates) >= 1
+
+
+def test_append_item_log_atomic(tmp_store):
+    """append_item_log atomically adds logs and updates item/batch timestamps."""
+    batch = viral_studio_store.create_batch({
+        "brand_id": "vale-o-clique",
+        "items": [{"source_url": "https://www.instagram.com/reel/atomic_log/"}],
+    })
+    item_id = batch["items"][0]["id"]
+    logs = viral_studio_store.append_item_log(item_id, {
+        "stage": "TEST_STAGE",
+        "message": "Atomic log test message",
+    })
+    assert len(logs) == 1
+    assert logs[0]["stage"] == "TEST_STAGE"
+    assert logs[0]["message"] == "Atomic log test message"
+
+    item = viral_studio_store.get_item(item_id)
+    assert len(item["logs"]) == 1
+    assert item["logs"][0]["stage"] == "TEST_STAGE"
+
+

@@ -71,11 +71,16 @@ export async function getBatch(id) {
   return res.json();
 }
 
-export async function createBatch({ brand_id, template_id, items }) {
+export async function createBatch({ brand_id, template_id, model, items }) {
   const res = await apiFetch(getApiUrl('/api/viral-studio/batches'), {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ brand_id, template_id: template_id || undefined, items }),
+    body: JSON.stringify({
+      brand_id,
+      template_id: template_id || undefined,
+      model: model || undefined,
+      items,
+    }),
   });
   if (!res.ok) {
     const err = await res.json().catch(() => ({}));

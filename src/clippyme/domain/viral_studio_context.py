@@ -210,7 +210,7 @@ def _extract_audio_transcript(video_path: str) -> str:
                     lines = [str(s.get("text", "")).strip() for s in transcript_data["segments"] if isinstance(s, dict)]
                     return " ".join([l for l in lines if l])
     except Exception as exc:
-        logger.debug("Audio transcription not available or returned empty: %s", exc)
+        logger.warning("Audio transcription encountered an error: %s", exc, exc_info=True)
     return ""
 
 

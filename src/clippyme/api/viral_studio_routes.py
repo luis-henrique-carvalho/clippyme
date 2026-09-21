@@ -19,6 +19,7 @@ from clippyme.api.viral_studio_schemas import (
     BrandResponse,
     BrandUpdate,
     ItemRenderRequest,
+    ItemRegenerateCopyRequest,
     TemplateCreate,
     TemplateListResponse,
     TemplateResponse,
@@ -162,6 +163,19 @@ async def get_item(id: str):
 async def update_item(id: str, payload: ViralItemUpdate):
     """Update commercial copy, product code, link, or manual headline for an item."""
     item = await asyncio.to_thread(viral_studio_store.update_item, id, payload)
+    return item
+
+
+@router.post("/items/{id}/regenerate-copy", response_model=ViralItem)
+async def regenerate_item_copy(id: str, payload: ItemRegenerateCopyRequest = None):
+    """Regenerate AI commercial copy and headlines for an item."""
+    model = payload.model if payload else None
+    manual_instructions = payload.manual_instructions if payload else None
+    item = await viral_studio_orchestrator.regenerate_item_copy(
+        id,
+        model=model,
+        manual_instructions=manual_instructions,
+    )
     return item
 
 

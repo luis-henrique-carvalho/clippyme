@@ -16,6 +16,11 @@ vi.mock('./realApi', () => ({
   getConfig: (...a) => getConfig(...a),
   saveConfig: (...a) => saveConfig(...a),
   getModels: vi.fn(async () => ({ models: [] })),
+  getLocalAIModels: vi.fn(async () => ({
+    lm_studio: { online: false, base_url: '', models: [] },
+    ollama: { online: false, base_url: '', models: [] },
+    models: [],
+  })),
   cookiesStatus: (...a) => cookiesStatus(...a),
   uploadCookies: vi.fn(),
   deleteCookies: vi.fn(),
@@ -192,4 +197,33 @@ test('removing platform cookies calls deletePlatformCookies and refreshes status
 
   await waitFor(() => expect(deletePlatformCookies).toHaveBeenCalledWith('youtube'));
   expect(pushToast).toHaveBeenCalledWith('info', 'Youtube cookies removed');
+});
+
+test('SettingsView renders local AI servers status cards for LM Studio and Ollama', async () => {
+  getConfig.mockResolvedValue(EMPTY_CONFIG);
+  const realApi = await import('./realApi');
+  vi.mocked(realApi.getLocalAIModels).mockResolvedValueOnce({
+    lm_studio: {
+      online: true,
+      base_url: 'http://localhost:1234',
+      models: [{ id: 'qwen2.5-7b-instruct', name: 'Qwen 2.5 7B' }],
+    },
+    ollama: {
+      online: false,
+      base_url: 'http://localhost:11434',
+      models: [],
+    },
+    models: [],
+  });
+
+  mount();
+
+  await waitFor(() => expect(screen.getByText('Servidores de IA Local')).toBeInTheDocument());
+  expect(screen.getByText('LM Studio')).toBeInTheDocument();
+  expect(screen.getByText('Ollama')).toBeInTheDocument();
+
+  // LM Studio connected with 1 model
+  expect(screen.getByText('Conectado (1 modelo)')).toBeInTheDocument();
+  // Ollama disconnected
+  expect(screen.getByText('Desconectado')).toBeInTheDocument();
 });

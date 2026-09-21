@@ -3,7 +3,7 @@
 // - Batch Grid: 9:16 vertical cards, flame/status badges, action footer identical to results.jsx.
 // - Modal editing: Sleek ViralEditModal for deep curation of headlines, captions, and product codes.
 // - Ingestion: Elegant single/batch creator inspired by create.jsx.
-import { useState, useEffect, useMemo, useCallback } from 'react';
+import { useState, useEffect, useMemo } from 'react';
 import { Icon, Btn, Panel, Segmented, Badge } from './primitives';
 import { Hero } from './chrome';
 import { relTime } from '../lib/relTime';
@@ -24,6 +24,7 @@ import {
   retryItem,
   viralVideoSrc,
 } from './viralApi';
+import { getLocalAIModels, getConfig } from './realApi';
 
 const STATUS_CONFIG = {
   PENDING: { label: 'Na fila', tone: 'out', icon: 'clock' },
@@ -51,10 +52,49 @@ function ViralClipCard({
   pushToast,
 }) {
   const [downloading, setDownloading] = useState(false);
+  const [elapsedSeconds, setElapsedSeconds] = useState(0);
   const statusCfg = STATUS_CONFIG[item.status] || STATUS_CONFIG.PENDING;
   const isBusy = item.status === 'DOWNLOADING' || item.status === 'ANALYZING' || item.status === 'RENDERING';
   const title = item.selected_headline || item.product_code || 'Vídeo Comercial';
   const videoSrc = viralVideoSrc(item);
+
+  const lastLog = item.logs && item.logs.length > 0 ? item.logs[item.logs.length - 1] : null;
+  const cleanBusyMessage = useMemo(() => {
+    if (!lastLog?.message) return `${statusCfg.label}…`;
+    const msg = lastLog.message;
+    if (msg.includes('http://') || msg.includes('https://')) {
+      const match = msg.match(/(?:Enviando prompt (?:e (\d+ frames) )?para )?([^(]+)\s*\(([^)]+)\)/i);
+      if (match) {
+        const frames = match[1] ? ` · ${match[1]}` : '';
+        const rawModel = match[3]?.split(' via ')[0]?.trim() || match[2]?.trim();
+        const shortModel = rawModel.split('/').pop() || rawModel;
+        return `IA Analisando (${shortModel}${frames})…`;
+      }
+      return 'IA Gerando Copy Comercial…';
+    }
+    return msg;
+  }, [lastLog, statusCfg.label]);
+
+  useEffect(() => {
+    if (!isBusy) {
+      setElapsedSeconds(0);
+      return;
+    }
+    const startTime = item.updated_at ? new Date(item.updated_at).getTime() : Date.now();
+    const updateTimer = () => {
+      const diff = Math.max(0, Math.floor((Date.now() - startTime) / 1000));
+      setElapsedSeconds(diff);
+    };
+    updateTimer();
+    const interval = setInterval(updateTimer, 1000);
+    return () => clearInterval(interval);
+  }, [isBusy, item.updated_at]);
+
+  const formatElapsed = (sec) => {
+    const mins = Math.floor(sec / 60);
+    const s = sec % 60;
+    return `${String(mins).padStart(2, '0')}:${String(s).padStart(2, '0')}s`;
+  };
 
   const handleDownload = () => {
     if (!item.rendered_path) return;
@@ -129,11 +169,16 @@ function ViralClipCard({
           {item.status === 'APPROVED' && <span className="clip-pub" style={{ borderColor: 'var(--brand-blue)', color: 'var(--blue-300)' }}><Icon n="check" />aprovado</span>}
         </div>
 
-        {/* Reprocessing / Loading overlay */}
+        {/* Reprocessing / Loading overlay with live stage message and timer */}
         {isBusy && (
-          <div className="clip-busy" role="status">
+          <div className="clip-busy" role="status" style={{ padding: '16px', textAlign: 'center', gap: 6 }}>
             <Icon n="loader" />
-            <span>{statusCfg.label}…</span>
+            <span style={{ fontWeight: 600, fontSize: 'var(--text-xs)', lineHeight: 1.3, maxWidth: '90%', wordBreak: 'break-word' }}>
+              {cleanBusyMessage}
+            </span>
+            <span style={{ fontSize: 'var(--text-3xs)', color: 'var(--blue-300)', background: 'rgba(0,0,0,0.6)', padding: '2px 8px', borderRadius: '10px', marginTop: 4 }}>
+              ⏱️ {formatElapsed(elapsedSeconds)}
+            </span>
           </div>
         )}
       </div>
@@ -233,6 +278,11 @@ export function ViralStudioView({ onOpenPublish, pushToast }) {
   const [activeBatchId, setActiveBatchId] = useState(null);
   const [activeBatch, setActiveBatch] = useState(null);
   const [brandFilter, setBrandFilter] = useState('ALL');
+  const [localAI, setLocalAI] = useState({
+    lm_studio: { online: false, models: [] },
+    ollama: { online: false, models: [] },
+    models: [],
+  });
 
   // Ingestion state
   const [rawUrls, setRawUrls] = useState('');
@@ -253,35 +303,44 @@ export function ViralStudioView({ onOpenPublish, pushToast }) {
     default_affiliate_url: '',
   });
 
-  const loadInitialData = useCallback(async () => {
-    try {
-      const [brandData, templateData, batchData] = await Promise.all([
-        getBrands().catch(() => ({ brands: [] })),
-        getTemplates().catch(() => ({ templates: [] })),
-        listBatches().catch(() => ({ batches: [] })),
-      ]);
-      setBrands(brandData.brands || []);
-      setTemplates(templateData.templates || []);
-      const fetchedBatches = batchData.batches || [];
-      setBatches(fetchedBatches);
-
-      if (brandData.brands?.length > 0 && !selectedBrandId) {
-        setSelectedBrandId(brandData.brands[0].id);
-      }
-      if (templateData.templates?.length > 0 && !selectedTemplateId) {
-        setSelectedTemplateId(templateData.templates[0].id);
-      }
-      if (fetchedBatches.length > 0 && !activeBatchId) {
-        setActiveBatchId(fetchedBatches[0].id);
-      }
-    } catch (err) {
-      pushToast?.('error', `Falha ao carregar dados: ${err.message}`);
-    }
-  }, [selectedBrandId, selectedTemplateId, activeBatchId, pushToast]);
-
   useEffect(() => {
-    loadInitialData();
-  }, [loadInitialData]);
+    let mounted = true;
+    (async () => {
+      try {
+        const [brandData, templateData, batchData, localData, configData] = await Promise.all([
+          getBrands().catch(() => ({ brands: [] })),
+          getTemplates().catch(() => ({ templates: [] })),
+          listBatches().catch(() => ({ batches: [] })),
+          getLocalAIModels().catch(() => ({ lm_studio: { online: false, models: [] }, ollama: { online: false, models: [] }, models: [] })),
+          getConfig().catch(() => null),
+        ]);
+        if (!mounted) return;
+        setBrands(brandData.brands || []);
+        setTemplates(templateData.templates || []);
+        const fetchedBatches = batchData.batches || [];
+        setBatches(fetchedBatches);
+        if (localData) setLocalAI(localData);
+
+        if (configData?.DEFAULT_AI_MODEL) {
+          setSelectedModel((prev) => prev || configData.DEFAULT_AI_MODEL);
+        }
+        if (brandData.brands?.length > 0) {
+          setSelectedBrandId((prev) => prev || brandData.brands[0].id);
+        }
+        if (templateData.templates?.length > 0) {
+          setSelectedTemplateId((prev) => prev || templateData.templates[0].id);
+        }
+        if (fetchedBatches.length > 0) {
+          setActiveBatchId((prev) => prev || fetchedBatches[0].id);
+        }
+      } catch (err) {
+        if (mounted) pushToast?.('error', `Falha ao carregar dados: ${err.message}`);
+      }
+    })();
+    return () => {
+      mounted = false;
+    };
+  }, [pushToast]);
 
   // Polling for active batch status when in review mode
   useEffect(() => {
@@ -296,12 +355,13 @@ export function ViralStudioView({ onOpenPublish, pushToast }) {
     };
 
     poll();
-    const interval = setInterval(poll, 2500);
+    const isAnyBusy = activeBatch?.items?.some((it) => ['PENDING', 'DOWNLOADING', 'ANALYZING', 'RENDERING'].includes(it.status));
+    const interval = setInterval(poll, isAnyBusy ? 1500 : 3500);
     return () => {
       mounted = false;
       clearInterval(interval);
     };
-  }, [activeBatchId, mode]);
+  }, [activeBatchId, mode, activeBatch?.items]);
 
   // Sync editingItem when activeBatch polls new logs / status
   useEffect(() => {
@@ -394,6 +454,10 @@ export function ViralStudioView({ onOpenPublish, pushToast }) {
 
   const selectedModelLabel = useMemo(() => {
     if (!selectedModel) return 'Padrão Gemini';
+    const foundLocal = (localAI?.models || []).find((m) => m.id === selectedModel);
+    if (foundLocal) {
+      return foundLocal.name;
+    }
     for (const group of AI_MODELS) {
       const found = group.options.find(([val]) => val === selectedModel);
       if (found) {
@@ -401,7 +465,7 @@ export function ViralStudioView({ onOpenPublish, pushToast }) {
       }
     }
     return selectedModel;
-  }, [selectedModel]);
+  }, [selectedModel, localAI]);
 
   const items = activeBatch?.items || [];
   const readyCount = items.filter((it) => it.status === 'READY_FOR_REVIEW' || it.status === 'APPROVED' || it.status === 'PUBLISHED').length;
@@ -1036,6 +1100,37 @@ export function ViralStudioView({ onOpenPublish, pushToast }) {
                     onChange={(e) => setSelectedModel(e.target.value)}
                   >
                     <option value="">Padrão (Configurações)</option>
+
+                    {/* LM Studio Conectado */}
+                    {localAI?.lm_studio?.online && localAI.lm_studio.models?.length > 0 && (
+                      <optgroup label={`🟢 LM Studio Conectado (${localAI.lm_studio.models.length})`}>
+                        {localAI.lm_studio.models.map((m) => (
+                          <option key={`lmstudio:${m.id}`} value={`lmstudio:${m.id}`}>
+                            {m.name} (LM Studio Local ⚡)
+                          </option>
+                        ))}
+                      </optgroup>
+                    )}
+
+                    {/* Ollama Conectado */}
+                    {localAI?.ollama?.online && localAI.ollama.models?.length > 0 && (
+                      <optgroup label={`🟢 Ollama Conectado (${localAI.ollama.models.length})`}>
+                        {localAI.ollama.models.map((m) => (
+                          <option key={`ollama:${m.id || m.name}`} value={`ollama:${m.id || m.name}`}>
+                            {m.name} (Ollama Local ⚡)
+                          </option>
+                        ))}
+                      </optgroup>
+                    )}
+
+                    {/* Indicação quando servidores locais estão offline */}
+                    {!localAI?.lm_studio?.online && !localAI?.ollama?.online && (
+                      <optgroup label="⚪ IA Local (Desconectada)">
+                        <option disabled value="">Nenhum servidor local ativo (:1234 / :11434)</option>
+                      </optgroup>
+                    )}
+
+                    {/* Fallback / Nuvem */}
                     {AI_MODELS.map((group) => (
                       <optgroup key={group.group} label={group.group}>
                         {group.options.map(([val, lbl]) => (

@@ -70,8 +70,11 @@ DEFAULT_MODELS_FALLBACK_CHAIN = [
 ]
 
 
+_KNOWN_PROVIDER_PREFIXES = ("lmstudio", "lm_studio", "local", "ollama", "gemini", "google")
+
+
 def parse_model_identifier(model_str: Optional[str]) -> tuple[str, str]:
-    """Parse a model identifier string (e.g. 'gemini:gemini-3.5-flash', 'ollama:llama3.2', or un-prefixed).
+    """Parse a model identifier string (e.g. 'gemini:gemini-3.5-flash', 'lmstudio:google/gemma-4-12b-qat', 'ollama:llama3.2:latest', or un-prefixed).
 
     Returns a tuple of (provider, model_name). Default provider is 'gemini'.
     """
@@ -80,14 +83,33 @@ def parse_model_identifier(model_str: Optional[str]) -> tuple[str, str]:
     s = str(model_str).strip()
     if ":" in s:
         p, m = s.split(":", 1)
-        return (p.strip().lower(), m.strip())
-    if s.lower().startswith("gemini"):
+        p_norm = p.strip().lower()
+        if p_norm in ("lmstudio", "lm_studio", "local"):
+            return ("lmstudio", m.strip())
+        if p_norm == "ollama":
+            return ("ollama", m.strip())
+        if p_norm in ("gemini", "google"):
+            return ("gemini", m.strip())
+        if p_norm in _KNOWN_PROVIDER_PREFIXES:
+            return (p_norm, m.strip())
+    s_lower = s.lower()
+    if s_lower.startswith("lmstudio") or s_lower.startswith("local"):
+        if s_lower.startswith("lmstudio"):
+            return ("lmstudio", s[8:].lstrip(":/ "))
+        return ("lmstudio", s[5:].lstrip(":/ "))
+    if s_lower.startswith("gemini"):
         return ("gemini", s)
-    if any(s.lower().startswith(prefix) for prefix in ("ollama", "llama", "qwen", "mistral", "deepseek", "phi", "gemma")):
-        if s.lower().startswith("ollama"):
-            return ("ollama", s[6:].lstrip(":/ "))
+    if s_lower.startswith("ollama"):
+        return ("ollama", s[6:].lstrip(":/ "))
+    # If the identifier has a slash (e.g. 'google/gemma-4-12b-qat', 'prism-ml/bonsai-27b')
+    # it is an LM Studio / HuggingFace formatted local model
+    if "/" in s:
+        return ("lmstudio", s)
+    # Plain un-prefixed names like 'llama3.2', 'llama3.2:latest', 'qwen2.5', 'mistral:7b' route to ollama
+    if any(s_lower.startswith(prefix) for prefix in ("llama", "qwen", "mistral", "deepseek", "phi", "gemma", "bonsai", "muse", "nemotron", "starcoder", "codellama")):
         return ("ollama", s)
     return ("gemini", s)
+
 
 
 class BaseAIProvider:
@@ -128,10 +150,13 @@ class GeminiProvider(BaseAIProvider):
             raise ValidationError("Gemini API key is not configured")
 
         configured_model = model_name or load_persistent_config().get("GEMINI_MODEL") or "gemini-3.5-flash"
+        if configured_model.startswith("gemini:"):
+            configured_model = configured_model[7:].strip()
         candidate_models = [configured_model]
         for m in DEFAULT_MODELS_FALLBACK_CHAIN:
             if m not in candidate_models:
                 candidate_models.append(m)
+
 
         client = genai.Client(api_key=resolved_api_key)
         payload = contents_payload if contents_payload is not None else prompt
@@ -221,19 +246,21 @@ class OllamaProvider(BaseAIProvider):
     def __init__(self, base_url: Optional[str] = None):
         self._base_url = base_url
 
-    def _resolve_base_url(self) -> str:
+    def _get_candidate_urls(self) -> List[str]:
         import os
-        url = (
-            self._base_url
-            or os.environ.get("OLLAMA_BASE_URL")
-            or load_persistent_config().get("OLLAMA_BASE_URL")
-            or "http://localhost:11434"
-        )
-        return str(url).rstrip("/")
+        if self._base_url:
+            return [str(self._base_url).rstrip("/")]
+        configured = os.environ.get("OLLAMA_BASE_URL") or load_persistent_config().get("OLLAMA_BASE_URL")
+        if configured:
+            return [str(configured).rstrip("/")]
+        return [
+            "http://host.docker.internal:11434",
+            "http://localhost:11434",
+            "http://127.0.0.1:11434",
+        ]
 
     def _sync_generate(
         self,
-        base_url: str,
         model_name: str,
         prompt: str,
         images: Optional[List[str]] = None,
@@ -242,7 +269,6 @@ class OllamaProvider(BaseAIProvider):
         import urllib.error
         import urllib.request
 
-        endpoint = f"{base_url}/api/generate"
         req_body: Dict[str, Any] = {
             "model": model_name,
             "prompt": prompt,
@@ -253,29 +279,37 @@ class OllamaProvider(BaseAIProvider):
             req_body["images"] = images
 
         data_bytes = json.dumps(req_body).encode("utf-8")
-        req = urllib.request.Request(
-            endpoint,
-            data=data_bytes,
-            headers={"Content-Type": "application/json"},
-            method="POST",
-        )
+        candidates = self._get_candidate_urls()
+        last_err: Optional[Exception] = None
 
-        try:
-            with urllib.request.urlopen(req, timeout=120) as response:
-                status_code = response.getcode()
-                resp_bytes = response.read()
-                if status_code >= 400:
-                    raise ClippyMeError(
-                        f"Ollama API returned HTTP {status_code}: {resp_bytes.decode('utf-8', errors='replace')}"
-                    )
-                return json.loads(resp_bytes.decode("utf-8"))
-        except urllib.error.HTTPError as err:
-            err_body = err.read().decode("utf-8", errors="replace") if hasattr(err, "read") else str(err)
-            raise ClippyMeError(f"Ollama HTTP error {err.code} ({model_name} at {base_url}): {err_body}") from err
-        except urllib.error.URLError as err:
-            raise ClippyMeError(f"Cannot connect to Ollama ({model_name} at {base_url}): {err.reason}") from err
-        except Exception as exc:
-            raise ClippyMeError(f"Ollama generation failed ({model_name} at {base_url}): {exc}") from exc
+        for base_url in candidates:
+            endpoint = f"{base_url}/api/generate"
+            req = urllib.request.Request(
+                endpoint,
+                data=data_bytes,
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+            try:
+                with urllib.request.urlopen(req, timeout=300) as response:
+                    status_code = response.getcode()
+                    resp_bytes = response.read()
+                    if status_code >= 400:
+                        raise ClippyMeError(
+                            f"Ollama API returned HTTP {status_code}: {resp_bytes.decode('utf-8', errors='replace')}"
+                        )
+                    return json.loads(resp_bytes.decode("utf-8"))
+            except urllib.error.HTTPError as err:
+                err_body = err.read().decode("utf-8", errors="replace") if hasattr(err, "read") else str(err)
+                raise ClippyMeError(f"Ollama HTTP error {err.code} ({model_name} at {base_url}): {err_body}") from err
+            except urllib.error.URLError as err:
+                last_err = err
+                continue
+            except Exception as exc:
+                raise ClippyMeError(f"Ollama generation failed ({model_name} at {base_url}): {exc}") from exc
+
+        err_msg = last_err.reason if last_err and hasattr(last_err, "reason") else (str(last_err) if last_err else "connection refused")
+        raise ClippyMeError(f"Cannot connect to Ollama ({model_name} at {candidates}): {err_msg}")
 
     async def generate_copy(
         self,
@@ -286,9 +320,11 @@ class OllamaProvider(BaseAIProvider):
         api_key: Optional[str] = None,
     ) -> tuple[str, Dict[str, Any]]:
         import base64
-        base_url = self._resolve_base_url()
         used_model = model_name or "llama3.2"
-        logger.info("OllamaProvider: Calling Ollama model %s at %s", used_model, base_url)
+        if used_model.startswith("ollama:"):
+            used_model = used_model[7:].strip()
+        logger.info("OllamaProvider: Calling Ollama model %s", used_model)
+
 
         # Extract base64 image frames if multimodal payload is supplied
         images_b64: List[str] = []
@@ -302,7 +338,7 @@ class OllamaProvider(BaseAIProvider):
                     images_b64.append(base64.b64encode(part).decode("utf-8"))
 
         t0 = time.monotonic()
-        data = await asyncio.to_thread(self._sync_generate, base_url, used_model, prompt, images_b64 or None)
+        data = await asyncio.to_thread(self._sync_generate, used_model, prompt, images_b64 or None)
         elapsed_ms = max(1, int((time.monotonic() - t0) * 1000))
 
         raw_response = data.get("response", "")
@@ -329,6 +365,148 @@ class OllamaProvider(BaseAIProvider):
             "estimated_cost_usd": 0.0,
             "cost_usd": 0.0,
             "latency_ms": latency_ms,
+            "prompt": prompt,
+            "raw_response": raw_response_text,
+        }
+        return raw_response_text, telemetry_data
+
+
+class LMStudioProvider(BaseAIProvider):
+    """Local LM Studio AI copy generator supporting OpenAI-compatible /v1/chat/completions."""
+
+    def __init__(self, base_url: Optional[str] = None):
+        self._base_url = base_url
+
+    def _get_candidate_urls(self) -> List[str]:
+        import os
+        if self._base_url:
+            return [str(self._base_url).rstrip("/")]
+        configured = os.environ.get("LM_STUDIO_BASE_URL") or load_persistent_config().get("LM_STUDIO_BASE_URL")
+        if configured:
+            return [str(configured).rstrip("/")]
+        return [
+            "http://host.docker.internal:1234",
+            "http://localhost:1234",
+            "http://127.0.0.1:1234",
+        ]
+
+    def _sync_generate(
+        self,
+        model_name: str,
+        prompt: str,
+        images: Optional[List[str]] = None,
+    ) -> Dict[str, Any]:
+        import json
+        import urllib.error
+        import urllib.request
+
+        if images and isinstance(images, list):
+            content_parts: List[Dict[str, Any]] = [{"type": "text", "text": prompt}]
+            for img_b64 in images:
+                content_parts.append({
+                    "type": "image_url",
+                    "image_url": {"url": f"data:image/jpeg;base64,{img_b64}"},
+                })
+            user_message: Dict[str, Any] = {"role": "user", "content": content_parts}
+        else:
+            user_message = {"role": "user", "content": prompt}
+
+        req_body: Dict[str, Any] = {
+            "model": model_name,
+            "messages": [user_message],
+            "temperature": 0.7,
+        }
+
+        data_bytes = json.dumps(req_body).encode("utf-8")
+        candidates = self._get_candidate_urls()
+        last_err: Optional[Exception] = None
+
+        for base_url in candidates:
+            endpoint = f"{base_url}/v1/chat/completions"
+            req = urllib.request.Request(
+                endpoint,
+                data=data_bytes,
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+            try:
+                with urllib.request.urlopen(req, timeout=300) as response:
+                    status_code = response.getcode()
+                    resp_bytes = response.read()
+                    if status_code >= 400:
+                        raise ClippyMeError(
+                            f"LM Studio API returned HTTP {status_code}: {resp_bytes.decode('utf-8', errors='replace')}"
+                        )
+                    return json.loads(resp_bytes.decode("utf-8"))
+            except urllib.error.HTTPError as err:
+                err_body = err.read().decode("utf-8", errors="replace") if hasattr(err, "read") else str(err)
+                raise ClippyMeError(f"LM Studio HTTP error {err.code} ({model_name} at {base_url}): {err_body}") from err
+            except urllib.error.URLError as err:
+                last_err = err
+                continue
+            except Exception as exc:
+                raise ClippyMeError(f"LM Studio generation failed ({model_name} at {base_url}): {exc}") from exc
+
+        err_msg = last_err.reason if last_err and hasattr(last_err, "reason") else (str(last_err) if last_err else "connection refused")
+        raise ClippyMeError(f"Cannot connect to LM Studio ({model_name} at {candidates}): {err_msg}")
+
+    async def generate_copy(
+        self,
+        prompt: str,
+        model_name: str,
+        *,
+        contents_payload: Any = None,
+        api_key: Optional[str] = None,
+    ) -> tuple[str, Dict[str, Any]]:
+        import base64
+        used_model = model_name or "local-model"
+        if used_model.startswith("lmstudio:"):
+            used_model = used_model[9:].strip()
+        elif used_model.startswith("local:"):
+            used_model = used_model[6:].strip()
+        logger.info("LMStudioProvider: Calling LM Studio model %s", used_model)
+
+
+        # Extract base64 image frames if multimodal payload is supplied
+        images_b64: List[str] = []
+        if isinstance(contents_payload, list):
+            for part in contents_payload:
+                if hasattr(part, "inline_data") and hasattr(part.inline_data, "data"):
+                    b = part.inline_data.data
+                    if isinstance(b, bytes):
+                        images_b64.append(base64.b64encode(b).decode("utf-8"))
+                elif isinstance(part, bytes):
+                    images_b64.append(base64.b64encode(part).decode("utf-8"))
+
+        t0 = time.monotonic()
+        data = await asyncio.to_thread(self._sync_generate, used_model, prompt, images_b64 or None)
+        elapsed_ms = max(1, int((time.monotonic() - t0) * 1000))
+
+        choices = data.get("choices", [])
+        if not choices or not isinstance(choices, list):
+            raise ClippyMeError(f"LM Studio returned empty or invalid choices for model {used_model}")
+
+        message = choices[0].get("message", {})
+        raw_response = message.get("content", "")
+        if not raw_response or not str(raw_response).strip():
+            raise ClippyMeError(f"LM Studio returned empty response for model {used_model}")
+
+        raw_response_text = str(raw_response)
+        usage = data.get("usage", {})
+        prompt_tokens = usage.get("prompt_tokens") or max(1, len(prompt) // 4)
+        candidate_tokens = usage.get("completion_tokens") or max(1, len(raw_response_text) // 4)
+        total_tokens = usage.get("total_tokens") or (prompt_tokens + candidate_tokens)
+
+        telemetry_data = {
+            "provider": "lm_studio",
+            "model": f"lmstudio:{used_model}",
+            "model_used": f"lmstudio:{used_model}",
+            "prompt_tokens": prompt_tokens,
+            "candidate_tokens": candidate_tokens,
+            "total_tokens": total_tokens,
+            "estimated_cost_usd": 0.0,
+            "cost_usd": 0.0,
+            "latency_ms": elapsed_ms,
             "prompt": prompt,
             "raw_response": raw_response_text,
         }
@@ -848,6 +1026,7 @@ async def generate_affiliate_copy(
     configured_model = (
         model
         or _extract_field(item, "model")
+        or load_persistent_config().get("DEFAULT_AI_MODEL")
         or load_persistent_config().get("GEMINI_MODEL")
         or "gemini-3.5-flash"
     )
@@ -910,7 +1089,15 @@ async def generate_affiliate_copy(
             logger.debug("Could not attach visual frame parts: %s", exc)
 
     # 6. Execute generation via resolved provider
-    if provider_name == "ollama":
+    if provider_name in ("lmstudio", "local", "lm_studio"):
+        lm_prov = LMStudioProvider()
+        raw_response_text, telemetry_data = await lm_prov.generate_copy(
+            prompt=prompt,
+            model_name=model_subname,
+            contents_payload=contents_payload,
+            api_key=api_key,
+        )
+    elif provider_name == "ollama":
         ollama_prov = OllamaProvider()
         raw_response_text, telemetry_data = await ollama_prov.generate_copy(
             prompt=prompt,
@@ -985,7 +1172,6 @@ async def generate_affiliate_copy(
     if item_id:
         try:
             from clippyme.domain import viral_studio_store
-
             update_dict: Dict[str, Any] = {
                 "ai_copy": copy_data.model_dump(),
                 "selected_headline": clean_effective_headline,
@@ -1011,4 +1197,5 @@ __all__ = [
     "BaseAIProvider",
     "GeminiProvider",
     "OllamaProvider",
+    "LMStudioProvider",
 ]

@@ -13,6 +13,9 @@ CONFIG_FILE = os.path.join(DATA_DIR, "config.json")
 VALID_CONFIG_KEYS = (
     "GEMINI_API_KEY",
     "GEMINI_MODEL",
+    "DEFAULT_AI_MODEL",
+    "LM_STUDIO_BASE_URL",
+    "OLLAMA_BASE_URL",
     "YOUTUBE_COOKIES",
     "HF_TOKEN",
     "DEEPGRAM_API_KEY",
@@ -160,6 +163,9 @@ def load_persistent_config() -> dict:
     config = {
         "GEMINI_API_KEY": os.environ.get("GEMINI_API_KEY", ""),
         "GEMINI_MODEL": os.environ.get("GEMINI_MODEL", "gemini-3.5-flash"),
+        "DEFAULT_AI_MODEL": os.environ.get("DEFAULT_AI_MODEL", ""),
+        "LM_STUDIO_BASE_URL": os.environ.get("LM_STUDIO_BASE_URL", ""),
+        "OLLAMA_BASE_URL": os.environ.get("OLLAMA_BASE_URL", ""),
         "YOUTUBE_COOKIES": os.environ.get("YOUTUBE_COOKIES", ""),
         "HF_TOKEN": os.environ.get("HF_TOKEN") or os.environ.get("HUGGINGFACE_TOKEN") or "",
         "DEEPGRAM_API_KEY": os.environ.get("DEEPGRAM_API_KEY", ""),
