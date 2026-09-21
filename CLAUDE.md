@@ -65,6 +65,11 @@ Python backend is src-layout under `src/clippyme/` (`pip install -e .`):
   consumers pass `original_index`),
   `grade.py`, `clip_qa.py`, `clip_edit_ai.py`, `history_service.py`,
   `encode.py` (single source of x264 settings for every render pass),
+  `viral_studio_context.py` (multi-signal context extraction: keyframes, audio transcript, metadata & engagement),
+  `viral_studio_copy.py` (multimodal copy generation with Gemini fallback, inline JPEG parts, full token/cost telemetry),
+  `viral_studio_download.py` (yt-dlp intake preserving source provenance, manifest, and engagement metrics),
+  `viral_studio_orchestrator.py` (step logging `append_item_log` and batch lifecycle orchestration),
+  `viral_studio_store.py` (atomic crash-safe JSON store with `_STORE_LOCK` and 0o600 permissions),
   `errors.py` (domain exceptions mapped to HTTP by one app-level handler).
 - `pipeline/` — `orchestrator.py` (**the entrypoint queued jobs actually run**:
   preflight → checkpointed `main.py` stages → per-render output QA; owns
@@ -269,10 +274,13 @@ through verbatim (the frontend parses per-platform 429 daily limits).
   With `TRUST_PROXY=1`, `client_ip` reads the **last** `X-Forwarded-For`
   hop (the shipped nginx APPENDS via `$proxy_add_x_forwarded_for` — the
 - **Viral Content Studio Rules**:
-  * `viral_studio_context.py`: Extract multi-signal context (yt-dlp title/caption/tags, keyframe JPEGs downscaled to ~512px, speech transcript). `_extract_audio_transcript` must use dynamic import to stay host-testable without cv2/torch.
-  * `viral_studio_copy.py`: Multimodal Gemini copy generation passes inline JPEG parts (`types.Part.from_bytes`) + context summary, guaranteeing zero product hallucinations at sub-cent token cost.
+  * `viral_studio_context.py`: Extract multi-signal context (yt-dlp title/caption/tags, keyframe JPEGs downscaled to ~512px saved under `/videos/viral_studio/<batch>/<item>/keyframes/`, speech transcript, engagement metrics `view_count`, `like_count`, `comment_count`, `repost_count`). `_extract_audio_transcript` must use dynamic import to stay host-testable without cv2/torch.
+  * `viral_studio_copy.py`: Multimodal Gemini copy generation passes inline JPEG parts (`types.Part.from_bytes`) + context summary, guaranteeing zero product hallucinations at sub-cent token cost. Persists full LLM telemetry (`model`, `prompt_tokens`, `candidate_tokens`, `estimated_cost_usd`, `latency_ms`, `prompt`, `raw_response`).
   * `job_runner.py` Failure Propagation: Subprocess exits with non-zero returncodes (including SIGSEGV 139 / GPU coredump) MUST sync terminal `FAILED` state to `viral_studio_store` and append structured `ERROR` telemetry so items never stay stuck in `ANALYZING` or `DOWNLOADING`.
-  * **Frontend Observability**: Processing cards must remain inspectable (`Ver Progresso & Logs`), auto-selecting the "Logs & Atividade" tab to provide real-time telemetry.
+  * **Frontend Observability**: `ViralEditModal.jsx` provides a dedicated 3-view Observability Hub (`Sinais Extraídos` with keyframe gallery lightbox & audio transcript, `Telemetria da LLM` with token/cost cards & prompt copy, `Linha do Tempo` with chronological stage tags).
+- **Docker Host UID & Reload Workflow**:
+  * `docker-entrypoint.sh` dynamically synchronizes container `appuser` with the host user's UID/GID (`stat -c '%u' /app`) at boot, ensuring all state files (`0o600`) in `data/` and `output/` belong to the developer on the host machine without permission errors.
+  * Because backend `uvicorn` in Docker runs without `--reload`, **always run `docker restart clippyme-backend`** after modifying backend Python files so the running uvicorn process reloads updated Pydantic schemas and route handlers.
 
 ## API endpoints
 
